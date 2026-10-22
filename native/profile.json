@@ -1,0 +1,64 @@
+{
+  "profile_format": 1,
+  "entry": "abi.ts",
+  "name": "core",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "core",
+    "init_symbol": "core_init",
+    "sink_register_symbol": "core_sink"
+  },
+  "exports": [
+    {
+      "export": "ctxOpen",
+      "symbol": "core_ctx_open",
+      "params": [
+        "i64"
+      ],
+      "returns": "i64"
+    },
+    {
+      "export": "ctxClose",
+      "symbol": "core_ctx_close",
+      "params": [
+        "i64"
+      ],
+      "returns": "i64"
+    },
+    {
+      "export": "ctxCount",
+      "symbol": "core_ctx_count",
+      "params": [],
+      "returns": "i64"
+    },
+    {
+      "export": "push",
+      "symbol": "core_push",
+      "params": [
+        "i64",
+        "i64",
+        "i64",
+        "i64"
+      ],
+      "returns": "i64"
+    },
+    {
+      "export": "clear",
+      "symbol": "core_clear",
+      "params": [
+        "i64"
+      ],
+      "returns": "i64"
+    },
+    {
+      "export": "validate",
+      "symbol": "core_validate",
+      "params": [
+        "i64",
+        "i64",
+        "i64"
+      ],
+      "returns": "i64"
+    }
+  ]
+}

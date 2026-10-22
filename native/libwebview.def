@@ -1,0 +1,17 @@
+LIBRARY libwebview.dll
+EXPORTS
+  webview_bind
+  webview_create
+  webview_destroy
+  webview_dispatch
+  webview_eval
+  webview_get_native_handle
+  webview_get_window
+  webview_init
+  webview_navigate
+  webview_return
+  webview_run
+  webview_set_html
+  webview_set_size
+  webview_set_title
+  webview_terminate

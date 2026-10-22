@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>text-edit</title>
+    <style>
+      :root {
+        --bg: #16181d;
+        --bg-alt: #1d2027;
+        --fg: #d6dae3;
+        --dim: #7b8494;
+        --accent: #6ea8fe;
+        --warn: #e5b567;
+        --bad: #e06c75;
+        --ok: #98c379;
+        --border: #2a2e38;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex; flex-direction: column;
+        font: 13px/1.5 ui-sans-serif, system-ui, sans-serif;
+        background: var(--bg); color: var(--fg);
+      }
+      header {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 10px; border-bottom: 1px solid var(--border);
+        background: var(--bg-alt); user-select: none;
+      }
+      #tabs { display: flex; gap: 2px; overflow-x: auto; flex: 1; min-width: 0; }
+      .tab {
+        display: flex; align-items: center; gap: 6px;
+        padding: 3px 8px; border-radius: 5px; cursor: pointer;
+        white-space: nowrap; color: var(--dim);
+      }
+      .tab:hover { background: #262a33; }
+      .tab.active { background: var(--bg); color: var(--fg); }
+      .dot { width: 6px; height: 6px; border-radius: 50%; background: transparent; flex: none; }
+      .dot.dirty { background: var(--warn); }
+      .dot.syncing { background: var(--accent); }
+      .dot.conflict { background: var(--bad); }
+      .dot.clean { background: transparent; }
+      .tab .close { opacity: 0; font-size: 14px; line-height: 1; }
+      .tab:hover .close { opacity: .6; }
+      .tab .close:hover { opacity: 1; color: var(--bad); }
+      #editor { flex: 1; min-height: 0; overflow: hidden; }
+      .cm-editor { height: 100%; }
+      .cm-scroller { font: 13px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
+      footer {
+        display: flex; gap: 14px; align-items: center;
+        padding: 3px 10px; border-top: 1px solid var(--border);
+        background: var(--bg-alt); color: var(--dim); font-size: 11px;
+        user-select: none;
+      }
+      footer .spacer { flex: 1; }
+      footer .k { color: var(--fg); }
+      footer button {
+        font: inherit; color: var(--fg); background: #262a33;
+        border: 1px solid var(--border); border-radius: 4px;
+        padding: 1px 8px; cursor: pointer;
+      }
+      footer button:hover { background: #313641; }
+      #empty button {
+        font: inherit; color: var(--fg); background: #262a33;
+        border: 1px solid var(--border); border-radius: 4px;
+        padding: 3px 10px; cursor: pointer;
+      }
+      #empty {
+        display: grid; place-items: center; height: 100%; color: var(--dim);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div id="tabs"></div>
+    </header>
+    <div id="editor"><div id="empty">No documents.</div></div>
+    <footer>
+      <span id="status">idle</span>
+      <span class="spacer"></span>
+      <span><span class="k">⌘/Ctrl+S</span> save now</span>
+      <span><span class="k">⌘/Ctrl+W</span> close</span>
+      <button id="new-doc">New</button>
+      <button id="reveal">Cache folder</button>
+    </footer>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
