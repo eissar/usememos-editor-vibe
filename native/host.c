@@ -250,9 +250,14 @@ static int mkdir_p(const char *path) {
 
 static void cache_init(void) {
   const char *root = getenv("TEXT_EDIT_CACHE");
+
   if (root == NULL || *root == '\0') {
     const char *home = getenv("HOME");
-    if (home == NULL) die("HOME not set and TEXT_EDIT_CACHE unset");
+#ifdef _WIN32
+    /* HOME is frequently unset on Windows; USERPROFILE is the equivalent. */
+    if (home == NULL || *home == '\0') home = getenv("USERPROFILE");
+#endif
+    if (home == NULL || *home == '\0') die("HOME not set and TEXT_EDIT_CACHE unset");
     snprintf(cache_root, sizeof cache_root, "%s/.cache/text-edit", home);
   } else {
     snprintf(cache_root, sizeof cache_root, "%s", root);
