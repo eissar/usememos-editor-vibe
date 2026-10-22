@@ -698,19 +698,63 @@ static const char *dispatch(const char *method, const char *params) {
 
 /* --- webview plumbing ---------------------------------------------------- */
 
+/* Escapes for a single-quoted JS string literal. Only backslash, the quote
+ * itself and control bytes need replacing; JSON is already ASCII-safe. */
+static void js_escape_single(char *out, size_t cap, const char *in) {
+  size_t w = 0;
+  for (const unsigned char *p = (const unsigned char *)in; *p != 0; p++) {
+    if (*p == '\\' || *p == '\'') {
+      if (w + 3 > cap) break;
+      out[w++] = '\\';
+      out[w++] = (char)*p;
+    } else if (*p == '\n') {
+      if (w + 3 > cap) break;
+      out[w++] = '\\';
+      out[w++] = 'n';
+    } else if (*p == '\r') {
+      if (w + 3 > cap) break;
+      out[w++] = '\\';
+      out[w++] = 'r';
+    } else if (*p < 0x20) {
+      if (w + 7 > cap) break;
+      w += (size_t)snprintf(out + w, cap - w, "\\u%04x", *p);
+    } else {
+      if (w + 2 > cap) break;
+      out[w++] = (char)*p;
+    }
+  }
+  out[w] = '\0';
+}
+
+/* Delivers a reply to the page. webview_return answers the native caller of the
+ * bound function, which the page never sees, so the reply has to be evaluated
+ * in the document instead. */
+static void reply_to_page(int64_t id, const char *json) {
+  char escaped[1 << 16];
+  js_escape_single(escaped, sizeof escaped, json);
+
+  char script[(1 << 16) + 128];
+  snprintf(script, sizeof script, "window.rpc._reply(%lld,'%s')", (long long)id, escaped);
+  webview_eval(g_window, script);
+}
+
 static void on_rpc(const char *seq, const char *req, void *arg) {
+  (void)seq;
   (void)arg;
+
+  int64_t id = 0;
+  if (!json_int(req, "id", &id)) return;
 
   char method[64];
   if (!json_str(req, "method", method, sizeof method)) {
-    webview_return(g_window, seq, 1, "{\"error\":\"malformed\"}");
+    reply_to_page(id, "{\"error\":\"malformed\"}");
     return;
   }
 
   const char *params = json_value(req, "params");
   if (params == NULL) params = "{}";
 
-  webview_return(g_window, seq, 0, dispatch(method, params));
+  reply_to_page(id, dispatch(method, params));
 }
 
 int main(void) {

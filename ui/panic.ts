@@ -39,6 +39,33 @@ export function parseReplyObject(raw: string): Parsed<Record<string, unknown>> {
 
 export function run<A extends unknown[]>(fn: (...args: A) => unknown, ...args: A): void {
   void Promise.resolve(fn(...args)).catch((error: unknown) => {
-    panic(error instanceof Error ? error.message : String(error));
+    panic(describe(error));
   });
+}
+
+/* Everything a throw can carry, rendered readably. A binding that rejects with
+ * a structured value otherwise surfaces as "[object Object]", which says
+ * nothing about what failed. */
+export function describe(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack !== undefined && error.stack !== "" ? error.stack : error.message;
+  }
+  if (error === null) return "null";
+  if (error === undefined) return "undefined";
+
+  if (typeof error === "object") {
+    try {
+      const text = JSON.stringify(error);
+      if (text !== undefined && text !== "{}") return text;
+    } catch {
+      // circular or otherwise unserialisable; fall through to a key dump
+    }
+    try {
+      return Object.prototype.toString.call(error) + " " + Object.keys(error).join(",");
+    } catch {
+      return "unprintable object";
+    }
+  }
+
+  return String(error);
 }
