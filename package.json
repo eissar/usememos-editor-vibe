@@ -5,7 +5,8 @@
   "scripts": {
     "ui": "bun run ui/build.ts",
     "build": "./native/build.sh",
-    "build:win": "./native/build.sh --windows"
+    "build:win": "./native/build.sh --windows",
+    "test": "bun run ui/build.ts && bun test"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.4",
