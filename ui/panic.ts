@@ -1,20 +1,19 @@
-export type Reporter = (reason: string) => void;
-
-let reporter: Reporter = (reason) => console.error(reason);
-
-export function onAssert(render: Reporter): void {
-  reporter = render;
+export function panic(reason: string): never {
+  const host = document.body ?? document.documentElement;
+  if (host !== null) {
+    const panel = document.createElement("pre");
+    panel.textContent = `text-edit: ${reason}`;
+    panel.style.cssText =
+      "position:fixed;inset:0;margin:0;padding:16px;z-index:2147483647;" +
+      "background:#16181d;color:#e06c75;font:13px/1.5 ui-monospace,monospace;" +
+      "white-space:pre-wrap;overflow:auto";
+    host.replaceChildren(panel);
+  }
+  throw new Error(reason);
 }
 
 export function assert(condition: unknown, reason: string): asserts condition {
-  if (condition) return;
-  reporter(reason);
-  throw new Error(reason);
-}
-
-export function panic(reason: string): never {
-  reporter(reason);
-  throw new Error(reason);
+  if (!condition) panic(reason);
 }
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false };
@@ -40,10 +39,6 @@ export function parseReplyObject(raw: string): Parsed<Record<string, unknown>> {
 
 export function run<A extends unknown[]>(fn: (...args: A) => unknown, ...args: A): void {
   void Promise.resolve(fn(...args)).catch((error: unknown) => {
-    reporter(message(error));
+    panic(error instanceof Error ? error.message : String(error));
   });
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

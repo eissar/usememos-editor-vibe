@@ -88,30 +88,33 @@ static doc_t docs[MAX_DOCS];
 static webview_t *g_window;
 
 /*
- * Every fatal path funnels through here. A GUI-subsystem binary has no console,
- * so stderr on double-click goes nowhere and the process looks like it simply
- * failed to start. The message is therefore shown natively before exiting: a
- * failure the user cannot see is indistinguishable from a hang.
+ * The single fatal path: report, then halt. There is no recovery.
+ *
+ * A GUI-subsystem binary has no console, so stderr on double-click goes
+ * nowhere and the process looks like it simply failed to start. Rendering into
+ * the page is not an option either: webview_eval is asynchronous and exit()
+ * would beat it to the paint. The message therefore goes to a blocking native
+ * surface plus stderr.
  */
+static void fatal(const char *msg) {
+  fprintf(stderr, "text-edit: %s\n", msg);
+
 #ifdef _WIN32
-static void notify(const char *msg) {
-  char body[2048];
-  snprintf(body, sizeof body,
-           "%s\n\nIf this is the first run, check that the WebView2 runtime is "
-           "installed:\nhttps://developer.microsoft.com/microsoft-edge/webview2/",
-           msg);
-  MessageBoxA(NULL, body, "text-edit - cannot start", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
-}
-#else
-static void notify(const char *msg) {
-  (void)msg;
-}
+  {
+    char body[2048];
+    snprintf(body, sizeof body,
+             "%s\n\nIf this is the first run, check that the WebView2 runtime is "
+             "installed:\nhttps://developer.microsoft.com/microsoft-edge/webview2/",
+             msg);
+    MessageBoxA(NULL, body, "text-edit", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+  }
 #endif
 
-static void die(const char *msg) {
-  fprintf(stderr, "text-edit: %s\n", msg);
-  notify(msg);
   exit(1);
+}
+
+static void die(const char *msg) {
+  fatal(msg);
 }
 
 /* --- tiny arena-free JSON helpers ---------------------------------------- */

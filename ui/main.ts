@@ -1,7 +1,7 @@
 import { EditorView } from "@codemirror/view";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { makeEditorState, type EditRange } from "./editor.ts";
-import { assert, onAssert, parseReplyObject, run } from "./panic.ts";
+import { assert, panic, parseReplyObject, run } from "./panic.ts";
 
 type RpcFn = (payload: string) => string;
 declare global {
@@ -52,42 +52,6 @@ function isDocText(value: unknown): value is { text: string } {
 function isDocId(value: unknown): value is { id: string } {
   return typeof (value as { id?: unknown } | null)?.id === "string";
 }
-
-function renderFailure(reason: string): void {
-  const box = document.getElementById("fatal");
-  if (box !== null) {
-    box.textContent += `\n${reason}`;
-    return;
-  }
-
-  const panel = document.createElement("pre");
-  panel.id = "fatal";
-  panel.textContent = `text-edit: ${reason}`;
-  panel.style.cssText =
-    "position:fixed;inset:0;margin:0;padding:16px;z-index:2147483647;" +
-    "background:#16181d;color:#e06c75;font:13px/1.5 ui-monospace,monospace;" +
-    "white-space:pre-wrap;overflow:auto";
-  (document.body ?? document.documentElement).append(panel);
-}
-
-onAssert((reason) => {
-  console.error(reason);
-  const status = document.getElementById("status");
-  if (status !== null) {
-    status.textContent = `error: ${reason}`;
-    status.style.color = "var(--bad)";
-    return;
-  }
-  renderFailure(reason);
-});
-
-window.addEventListener("error", (event) => {
-  renderFailure(String(event.error ?? event.message));
-});
-
-window.addEventListener("unhandledrejection", (event) => {
-  renderFailure(String(event.reason));
-});
 
 interface DocSummary {
   id: string;
