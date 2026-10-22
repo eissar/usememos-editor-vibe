@@ -19,7 +19,7 @@ Each one's cloud state (the memo's `updateTime` and a hash of the text the
 cloud holds) lives in `memos/.sync/<id>`, so a document is synced when its
 text hashes to that value.
 
-A push runs 10 s after the last save: the page fetches the memo, refuses if
+A push runs 10 s after the last save, or at once on Ctrl+S: the page fetches the memo, refuses if
 its `updateTime` moved since the last pull or push (changed in the cloud), else
 PATCHes the content and records the new `updateTime`. Failed pushes retry when
 the window regains focus. Closing a tab deletes only the local file and is

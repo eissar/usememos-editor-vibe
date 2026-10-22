@@ -473,8 +473,14 @@ async function saveActive() {
   statusEl.textContent = "saving...";
   await flushEdits(id);
   await rpc("save", { id });
-  await refresh();
-  statusEl.textContent = "saved";
+
+  // Ctrl+S also pushes now instead of waiting out the sync debounce.
+  const pending = syncTimers.get(id);
+  if (pending !== undefined) clearTimeout(pending);
+  statusEl.textContent = "syncing...";
+  await attemptSync(id);
+  const failure = syncFailed.get(id);
+  statusEl.textContent = failure === undefined ? "saved and synced" : `saved; sync failed: ${failure}`;
 }
 
 /*
