@@ -115,6 +115,10 @@ function element<T extends Element>(selector: string): T {
 const tabsEl = element<HTMLDivElement>("#tabs");
 const editorEl = element<HTMLDivElement>("#editor");
 const statusEl = element<HTMLSpanElement>("#status");
+// The footer cuts long messages short; the full text is the hover title.
+new MutationObserver(() => {
+  statusEl.title = statusEl.textContent ?? "";
+}).observe(statusEl, { childList: true, characterData: true, subtree: true });
 const emptyEl = element<HTMLDivElement>("#empty");
 const browseButton = element<HTMLButtonElement>("#browse");
 const revealButton = element<HTMLButtonElement>("#reveal");

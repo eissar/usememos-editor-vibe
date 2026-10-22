@@ -55,7 +55,11 @@
         background: var(--bg-alt); color: var(--dim); font-size: 11px;
         user-select: none;
       }
+      footer > * { flex: none; white-space: nowrap; }
       footer .spacer { flex: 1; }
+      /* A long message is cut with an ellipsis (full text on hover) instead of
+       * wrapping the footer and squeezing the buttons. */
+      footer #status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
       footer .k { color: var(--fg); }
       footer button {
         font: inherit; color: var(--fg); background: #262a33;

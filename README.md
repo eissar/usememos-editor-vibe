@@ -1,33 +1,41 @@
-# text-edit
+# usememos-editor-vibe
 
-Cross-platform desktop text editor. C host, delta arithmetic compiled by
-[scriptc](https://scriptc.dev).
+A desktop Markdown editor for [Memos](https://github.com/usememos/memos). Open
+memos from your server, edit them with syntax highlighting (Markdown, and
+fenced code in its own language), and the edits are pushed back. A small C host
+drives a native webview (WebView2 on Windows, WebKitGTK on Linux); the UI is
+CodeMirror 6; delta arithmetic is compiled by [scriptc](https://scriptc.dev).
 
-Each document is `memos/<id>.md` under the cache root, and the directory
-listing is the document list. Ids are `local-<random>` until a document has a
-cloud memo, then the memo id. Documents have no names: a tab shows the first
-line of the text. Edits are held
-in the page and written after 3 s without typing (a red `*` marks the tab
-meanwhile); Ctrl+S, switching tabs, renaming, closing and the window losing focus write
-immediately. When the window regains focus the host rescans `memos/`: new
-files open, deleted ones close, and files changed elsewhere reload. Nothing
-polls.
+## How it works
 
-Every `memos/*.md` file is a tab; a tab exists exactly as long as its file.
-Documents are cloud memos opened from Browse, kept as `memos/<memo id>.md`.
-Each one's cloud state (the memo's `updateTime` and a hash of the text the
-cloud holds) lives in `memos/.sync/<id>`, so a document is synced when its
-text hashes to that value.
+- **Browse** lists your memos 20 at a time; click a memo id to open it. It is
+  kept locally as `memos/<memo id>.md` under the cache root, and every such
+  file is a tab: a tab exists exactly as long as its file.
+- **Saving.** Edits are written locally after 3 s without typing; Ctrl+S,
+  switching tabs, closing and the window losing focus write at once. A `*`
+  marks unsaved edits and turns red if a save is late.
+- **Syncing.** A push runs 10 s after the last save, or at once on Ctrl+S. It
+  fetches the memo and refuses if its `updateTime` moved since the last pull or
+  push (changed in the cloud, never overwritten); otherwise it PATCHes the
+  content. The tab shows `^` while waiting and a red `!` when a push failed
+  (hover for the reason). Failed pushes retry when the window regains focus.
+  Cloud state (the memo's `updateTime` and a hash of the text the cloud holds)
+  lives in `memos/.sync/<id>`.
+- **Closing** a tab deletes only the local file, and is refused until the
+  document is synced.
+- **Nothing polls.** When the window regains focus the host rescans `memos/`:
+  new files open, deleted ones close, files changed elsewhere reload.
+- **No silent failures.** Errors halt with the reason (a message box from the
+  host, or the page's error screen); a startup watchdog catches a page that
+  never comes up.
 
-A push runs 10 s after the last save, or at once on Ctrl+S: the page fetches the memo, refuses if
-its `updateTime` moved since the last pull or push (changed in the cloud), else
-PATCHes the content and records the new `updateTime`. Failed pushes retry when
-the window regains focus. Closing a tab deletes only the local file and is
-refused until the document is synced. The tab shows `^` while waiting and a red
-`!` when a push failed (hover for the reason). A `*` marks unsaved edits and turns red if the save is late. Marks read
-`*` then `^`/`!` in a fixed-width slot.
-Writes go through temp-file-and-rename.
+![Editor with Markdown and code highlighting](docs/screenshots/2-editor-highlighting.png)
 
+| Browse memos | Push refused: changed in the cloud |
+|---|---|
+| ![Browse](docs/screenshots/1-browse.png) | ![Conflict](docs/screenshots/4-sync-conflict.png) |
+
+More in [docs/screenshots](docs/screenshots).
 ## Build
 
 ```sh
@@ -106,10 +114,14 @@ batch).
 
 | | size |
 |---|---|
-| linux host | 1.5 MB |
-| windows host | 2.5 MB |
+| windows host (`.exe`, page embedded) | 4.4 MB |
 
 ## Status
 
 Prototype. Runs on Windows. There is no WebKitGTK on the Linux dev box, so the
 Linux host is only exercised against a stub webview.
+
+## License
+
+MIT; see [LICENSE](LICENSE). Bundled third-party components are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
