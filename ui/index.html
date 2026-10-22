@@ -68,6 +68,39 @@
         border: 1px solid var(--border); border-radius: 4px;
         padding: 3px 10px; cursor: pointer;
       }
+      body { position: relative; }
+      #browser {
+        position: absolute; inset: 40px 40px 34px; z-index: 10;
+        display: flex; flex-direction: column;
+        background: var(--bg-alt); border: 1px solid var(--border); border-radius: 6px;
+        box-shadow: 0 8px 30px #0008; outline: none;
+      }
+      #browser[hidden] { display: none; }
+      #browser .bar {
+        display: flex; align-items: center; gap: 10px;
+        padding: 8px 12px; border-bottom: 1px solid var(--border);
+      }
+      #browser .spacer { flex: 1; }
+      #browser .info { color: var(--dim); }
+      #browser button {
+        background: #262a33; color: var(--fg); border: 1px solid var(--border);
+        border-radius: 4px; padding: 2px 10px; font: inherit; cursor: pointer;
+      }
+      #browser button:disabled { opacity: .4; cursor: default; }
+      #browser .rows { overflow-y: auto; flex: 1; }
+      #browser .row {
+        display: grid; grid-template-columns: 1fr auto auto; gap: 16px;
+        padding: 5px 12px; border-bottom: 1px solid var(--border);
+      }
+      #browser .row:nth-child(even) { background: #1a1d23; }
+      #browser .snippet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #browser .time { color: var(--dim); }
+      #browser button.memo-id {
+        background: none; border: none; padding: 0; border-radius: 0;
+        color: var(--accent); font-family: ui-monospace, Consolas, monospace;
+        text-decoration: underline; cursor: pointer;
+      }
+      #browser button.memo-id:disabled { color: var(--dim); }
       #empty {
         display: grid; place-items: center; height: 100%; color: var(--dim);
       }
@@ -78,14 +111,24 @@
       <div id="tabs"></div>
     </header>
     <div id="editor"><div id="empty">No documents.</div></div>
+    <div id="browser" tabindex="-1" hidden>
+      <div class="bar">
+        <strong>Memos</strong>
+        <span class="info"></span>
+        <span class="spacer"></span>
+        <button class="prev">Prev</button>
+        <button class="next">Next</button>
+        <button class="close-browser">Close</button>
+      </div>
+      <div class="rows"></div>
+    </div>
     <footer>
       <span id="status">idle</span>
       <span class="spacer"></span>
       <span><span class="k">Ctrl+S</span> save now</span>
       <span><span class="k">Ctrl+W</span> close (deletes; needs sync)</span>
-      <span><span class="k">Ctrl+N</span> new</span>
       <span><span class="k">Ctrl+Tab</span> next tab</span>
-      <button id="new-doc">New</button>
+      <button id="browse">Browse</button>
       <button id="reveal">Cache folder</button>
     </footer>
     <script type="module" src="./main.ts"></script>

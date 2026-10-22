@@ -46,6 +46,8 @@ function cLiteral(s: string): string {
     if (b === 0x5c) piece = "\\\\";
     else if (b === 0x22) piece = '\\"';
     else if (b === 0x0a) piece = "\\n";
+    // "??(" and friends are C trigraphs; minified JS contains "??(" from `??`.
+    else if (b === 0x3f) piece = "\\?";
     else if (b >= 0x20 && b <= 0x7e) piece = String.fromCharCode(b);
     else piece = "\\" + b.toString(8).padStart(3, "0");
 

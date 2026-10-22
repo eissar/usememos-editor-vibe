@@ -64,6 +64,21 @@ describe("MemosClient", () => {
     expect(new URL(seen[2]!.url).searchParams.get("pageToken")).toBe("p2");
   });
 
+  test("listMemosPage returns one page and its token; me is fetched once", async () => {
+    const { fn, seen } = fakeFetch((req) => {
+      if (req.url.endsWith("/auth/me")) return json({ user: { name: "users/7" } });
+      return json({ memos: [{ name: "memos/a", content: "A" }], nextPageToken: "p2" });
+    });
+    const c = client(fn);
+    const first = await c.listMemosPage({ pageSize: 20 });
+    expect(first).toEqual({ ok: true, value: { memos: [{ name: "memos/a", content: "A" }], nextPageToken: "p2" } });
+    await c.listMemosPage({ pageSize: 20 }, "p2");
+    expect(seen.filter((r) => r.url.endsWith("/auth/me")).length).toBe(1);
+    const second = new URL(seen.at(-1)!.url);
+    expect(second.searchParams.get("pageSize")).toBe("20");
+    expect(second.searchParams.get("pageToken")).toBe("p2");
+  });
+
   test("createMemo posts content and passes a requested id as memoId", async () => {
     const { fn, seen } = fakeFetch((req) => json({ name: "memos/local-abc", content: (req.body as { content: string }).content }));
     const r = await client(fn).createMemo("hello", { id: "local-abc" });
@@ -104,6 +119,21 @@ describe("MemosClient", () => {
 
     const notJson = await client(fakeFetch(() => new Response("<html>", { status: 200 })).fn).getMemo("a");
     expect(notJson.ok === false && notJson.error.kind).toBe("malformed");
+  });
+
+  test("the default fetch is called with globalThis as its receiver", async () => {
+    const original = globalThis.fetch;
+    let receiver: unknown = null;
+    globalThis.fetch = function (this: unknown) {
+      receiver = this;
+      return Promise.resolve(json({ user: { name: "users/1" } }));
+    } as typeof fetch;
+    try {
+      await new MemosClient({ baseUrl: "http://memos.test", token: "t" }).me();
+    } finally {
+      globalThis.fetch = original;
+    }
+    expect(receiver === undefined || receiver === globalThis).toBe(true);
   });
 
   test("a slow server times out", async () => {

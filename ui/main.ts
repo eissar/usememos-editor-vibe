@@ -2,6 +2,8 @@ import { EditorView } from "@codemirror/view";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { makeEditorState, type EditRange } from "./editor.ts";
 import { assert, describe, panic, parseReplyObject, run } from "./panic.ts";
+import { MemoBrowser } from "./browser.ts";
+import { MemosClient, describeError } from "./usememos_api.ts";
 
 /*
  * The host replies by evaluating window.rpc._reply(id, json) in this document,
@@ -113,10 +115,46 @@ const tabsEl = element<HTMLDivElement>("#tabs");
 const editorEl = element<HTMLDivElement>("#editor");
 const statusEl = element<HTMLSpanElement>("#status");
 const emptyEl = element<HTMLDivElement>("#empty");
-const newButton = element<HTMLButtonElement>("#new-doc");
+const browseButton = element<HTMLButtonElement>("#browse");
 const revealButton = element<HTMLButtonElement>("#reveal");
 
-newButton.addEventListener("click", () => run(newDocument));
+/* The Memos client is built on first use from the host's environment. */
+let memosClient: Promise<MemosClient> | null = null;
+
+function getMemosClient(): Promise<MemosClient> {
+  memosClient ??= rpc<{ baseUrl?: unknown; token?: unknown; apiPrefix?: unknown }>("config").then((c) => {
+    assert(typeof c.baseUrl === "string" && typeof c.token === "string", "config: missing baseUrl or token");
+    return new MemosClient({
+      baseUrl: c.baseUrl,
+      token: c.token,
+      apiPrefix: typeof c.apiPrefix === "string" ? c.apiPrefix : undefined,
+    });
+  });
+  return memosClient;
+}
+
+/*
+ * Opens a cloud memo for editing: fetch it, hand it to the host as
+ * memos/<memo id>.md, show it. Resolves to an error message, or null.
+ */
+async function openMemo(id: string): Promise<string | null> {
+  const client = await getMemosClient();
+  const memo = await client.getMemo(id);
+  if (!memo.ok) return describeError(memo.error);
+  try {
+    await rpc("import", { id, content: memo.value.content });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.startsWith("rpc: ")) throw error;
+    return message.slice(5);
+  }
+  await refresh();
+  await activate(id);
+  return null;
+}
+
+const browser = new MemoBrowser(element<HTMLElement>("#browser"), getMemosClient, openMemo);
+browseButton.addEventListener("click", () => run(() => browser.open()));
 revealButton.addEventListener("click", () => run(rpc, "reveal"));
 
 let view: EditorView | null = null;
@@ -374,19 +412,8 @@ async function refresh() {
   renderTabs();
 }
 
-async function newDocument() {
-  const reply = await rpc<unknown>("create");
-  assert(isDocId(reply), "create: reply has no id");
-  await refresh();
-  await activate(reply.id);
-}
-
 function showEmpty() {
-  emptyEl.replaceChildren("No documents. ");
-  const button = document.createElement("button");
-  button.textContent = "New document";
-  button.addEventListener("click", () => run(newDocument));
-  emptyEl.append(button);
+  emptyEl.replaceChildren("No documents.");
   if (!emptyEl.isConnected) editorEl.append(emptyEl);
 }
 
@@ -426,9 +453,6 @@ window.addEventListener(
       case "KeyW":
         if (activeId) run(closeDoc, activeId);
         break;
-      case "KeyN":
-        run(newDocument);
-        break;
       case "Tab":
         cycleTab(e.shiftKey ? -1 : 1);
         break;
@@ -450,7 +474,7 @@ window.addEventListener(
 );
 
 /*
- * No polling: bodies/ is re-read when the window regains focus, which is when
+ * No polling: memos/ is re-read when the window regains focus, which is when
  * changes made elsewhere first matter. Held edits are written when focus
  * leaves, so a rescan never meets unsaved text.
  */

@@ -176,22 +176,79 @@ static int json_int(const char *json, const char *key, int64_t *out) {
   return 1;
 }
 
-/* Copies a JSON string value into buf; handles no escapes beyond \" and \\,
- * which is all the frontend emits for document ids. */
+static int hex4(const char *p, unsigned *out) {
+  unsigned v = 0;
+  for (int i = 0; i < 4; i++) {
+    char c = p[i];
+    v <<= 4;
+    if (c >= '0' && c <= '9') v |= (unsigned)(c - '0');
+    else if (c >= 'a' && c <= 'f') v |= (unsigned)(c - 'a' + 10);
+    else if (c >= 'A' && c <= 'F') v |= (unsigned)(c - 'A' + 10);
+    else return 0;
+  }
+  *out = v;
+  return 1;
+}
+
+/* Appends code point `cp` as UTF-8 if it fits (leaving room for the NUL). */
+static void put_utf8(char *buf, size_t cap, size_t *n, unsigned cp) {
+  char tmp[4];
+  size_t len;
+  if (cp < 0x80) { tmp[0] = (char)cp; len = 1; }
+  else if (cp < 0x800) { tmp[0] = (char)(0xC0 | (cp >> 6)); tmp[1] = (char)(0x80 | (cp & 0x3F)); len = 2; }
+  else if (cp < 0x10000) {
+    tmp[0] = (char)(0xE0 | (cp >> 12)); tmp[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    tmp[2] = (char)(0x80 | (cp & 0x3F)); len = 3;
+  } else {
+    tmp[0] = (char)(0xF0 | (cp >> 18)); tmp[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    tmp[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); tmp[3] = (char)(0x80 | (cp & 0x3F)); len = 4;
+  }
+  if (*n + len < cap) {
+    memcpy(buf + *n, tmp, len);
+    *n += len;
+  }
+}
+
+/* Copies a JSON string value into buf, decoding every JSON escape (\uXXXX and
+ * surrogate pairs included). Truncates to fit; returns 0 if `key` is absent
+ * or not a string. */
 static int json_str(const char *json, const char *key, char *buf, size_t cap) {
   const char *at = json_value(json, key);
   if (at == NULL || *at != '"') return 0;
   at++;
   size_t n = 0;
   while (*at != '\0' && *at != '"') {
-    if (*at == '\\' && at[1] != '\0') {
-      at++;
-      if (n + 1 < cap) buf[n++] = (*at == 'n') ? '\n' : *at;
+    if (*at != '\\') {
+      if (n + 1 < cap) buf[n++] = *at;
       at++;
       continue;
     }
-    if (n + 1 < cap) buf[n++] = *at;
     at++;
+    char e = *at;
+    if (e == '\0') break;
+    at++;
+    switch (e) {
+      case 'n': if (n + 1 < cap) buf[n++] = '\n'; break;
+      case 't': if (n + 1 < cap) buf[n++] = '\t'; break;
+      case 'r': if (n + 1 < cap) buf[n++] = '\r'; break;
+      case 'b': if (n + 1 < cap) buf[n++] = '\b'; break;
+      case 'f': if (n + 1 < cap) buf[n++] = '\f'; break;
+      case 'u': {
+        unsigned cp = 0;
+        if (!hex4(at, &cp)) break;
+        at += 4;
+        if (cp >= 0xD800 && cp <= 0xDBFF && at[0] == '\\' && at[1] == 'u') {
+          unsigned lo = 0;
+          if (hex4(at + 2, &lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+            at += 6;
+          }
+        }
+        put_utf8(buf, cap, &n, cp);
+        break;
+      }
+      default: if (n + 1 < cap) buf[n++] = e; break; /* \" \\ \/ */
+    }
   }
   buf[n] = '\0';
   return 1;
@@ -199,7 +256,7 @@ static int json_str(const char *json, const char *key, char *buf, size_t cap) {
 
 /* --- persistence --------------------------------------------------------- */
 /*
- * Each document is <root>/bodies/<id>.md, and the directory listing is the list
+ * Each document is <root>/memos/<id>.md, and the directory listing is the list
  * of documents. Every write goes through a temp file and rename, so an
  * interrupted write leaves either the old content or the new one, never a
  * truncated file. Bodies are written on every edit, so a crash loses nothing
@@ -208,13 +265,16 @@ static int json_str(const char *json, const char *key, char *buf, size_t cap) {
 
 static char cache_root[1024];
 
+/* Documents directory under the cache root. */
+#define DOCS_DIR "memos"
+
 static void path_join(char *out, size_t cap, const char *a, const char *b) {
   int n = snprintf(out, cap, "%s/%s", a, b);
   if (n < 0 || (size_t)n >= cap) die("path too long");
 }
 
 /*
- * A document's id is the file stem in bodies/<id>.md: "local-<random>" until
+ * A document's id is the file stem in memos/<id>.md: "local-<random>" until
  * the document has a cloud memo, then the memo id. Ids are [A-Za-z0-9_-], so
  * they are valid filenames everywhere and need no escaping in JSON.
  */
@@ -237,7 +297,7 @@ static int body_path(char *out, size_t cap, const char *id) {
   char file[MAX_ID + 8];
   snprintf(file, sizeof file, "%s.md", id);
   char dir[1200];
-  path_join(dir, sizeof dir, cache_root, "bodies");
+  path_join(dir, sizeof dir, cache_root, DOCS_DIR);
   path_join(out, cap, dir, file);
   return 1;
 }
@@ -284,9 +344,9 @@ static void cache_init(void) {
   }
 
   if (!mkdir_p(cache_root)) die("cannot create cache root");
-  char bodies[1200];
-  path_join(bodies, sizeof bodies, cache_root, "bodies");
-  if (!mkdir_p(bodies)) die("cannot create bodies directory");
+  char docs_dir[1200];
+  path_join(docs_dir, sizeof docs_dir, cache_root, DOCS_DIR);
+  if (!mkdir_p(docs_dir)) die("cannot create the documents directory");
 }
 
 static int write_atomic(const char *path, const char *data, size_t len) {
@@ -334,6 +394,22 @@ static int json_escape_to(char *out, size_t cap, const char *in, size_t *written
   return 1;
 }
 
+/* Rewrites CRLF and lone CR as LF in place. The editor holds text with LF
+ * only, and its offsets must address the same bytes as the host's copy. */
+static size_t normalize_newlines(char *text, size_t len) {
+  size_t w = 0;
+  for (size_t r = 0; r < len; r++) {
+    if (text[r] == '\r') {
+      text[w++] = '\n';
+      if (r + 1 < len && text[r + 1] == '\n') r++;
+    } else {
+      text[w++] = text[r];
+    }
+  }
+  text[w] = '\0';
+  return w;
+}
+
 static char *read_body(const char *id, size_t *len_out) {
   char path[1300];
   if (!body_path(path, sizeof path, id)) return NULL;
@@ -359,7 +435,7 @@ static char *read_body(const char *id, size_t *len_out) {
   fclose(f);
 
   buf[len] = '\0';
-  *len_out = len;
+  *len_out = normalize_newlines(buf, len);
   return buf;
 }
 
@@ -515,9 +591,9 @@ static void consider_entry(const char *name, char **ids, int *n) {
   (*n)++;
 }
 
-static int scan_bodies(char **ids) {
+static int scan_docs(char **ids) {
   char dir[1200];
-  path_join(dir, sizeof dir, cache_root, "bodies");
+  path_join(dir, sizeof dir, cache_root, DOCS_DIR);
   int n = 0;
 
 #ifdef _WIN32
@@ -551,7 +627,7 @@ static void append_id(char *out, size_t cap, size_t *w, int *first, const char *
 }
 
 /*
- * Brings the document table in line with bodies/: files that appeared are
+ * Brings the document table in line with memos/: files that appeared are
  * opened, documents whose file is gone are dropped, and documents whose file
  * changed on disk are reloaded. Writes the changed and removed ids into `out`
  * as {"changed":[...],"removed":[...]}.
@@ -560,7 +636,7 @@ static void append_id(char *out, size_t cap, size_t *w, int *first, const char *
 
 static void rescan(char *out, size_t cap) {
   char *ids[MAX_DOCS];
-  int n = scan_bodies(ids);
+  int n = scan_docs(ids);
 
   size_t w = (size_t)snprintf(out, cap, "{\"changed\":[");
   int first = 1;
@@ -675,6 +751,40 @@ static const char *dispatch(const char *method, const char *params) {
     if (d == NULL) return "{\"error\":\"cannot create\"}";
 
     snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"id\":\"%s\"}}", id);
+    return reply_buf;
+  }
+
+  /* Takes a memo fetched from the cloud and makes it a document. A document
+   * that already exists is left alone: it may hold edits the cloud lacks. */
+  if (strcmp(method, "import") == 0) {
+    char id[MAX_ID + 1];
+    if (!json_str(params, "id", id, sizeof id) || !id_valid(id)) return "{\"error\":\"invalid memo id\"}";
+    if (doc_find(id) != NULL) {
+      snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"id\":\"%s\",\"existed\":true}}", id);
+      return reply_buf;
+    }
+
+    char path[1300];
+    if (!body_path(path, sizeof path, id)) return "{\"error\":\"invalid memo id\"}";
+    int on_disk = file_exists(path);
+    if (!on_disk) {
+      char *content = malloc(MAX_TEXT);
+      if (content == NULL) die("out of memory");
+      if (!json_str(params, "content", content, MAX_TEXT)) {
+        free(content);
+        return "{\"error\":\"missing content\"}";
+      }
+      size_t len = normalize_newlines(content, strlen(content));
+      int ok = write_atomic(path, content, len);
+      free(content);
+      if (!ok) return "{\"error\":\"write failed\"}";
+    }
+
+    doc_t *d = doc_open(id);
+    if (d == NULL) return "{\"error\":\"cannot open\"}";
+    d->synced = !on_disk;
+    snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"id\":\"%s\",\"existed\":%s}}", id,
+             on_disk ? "true" : "false");
     return reply_buf;
   }
 
@@ -884,6 +994,27 @@ static const char *dispatch(const char *method, const char *params) {
     return reply_buf;
   }
 
+  /* Cloud settings for the page's Memos client. require_env() has already
+   * guaranteed the required ones are present. */
+  if (strcmp(method, "config") == 0) {
+    const char *names[] = {"MEMOS_BASE_URL", "MEMOS_KEY", "MEMOS_API_PREFIX"};
+    const char *keys[] = {"baseUrl", "token", "apiPrefix"};
+    size_t w = (size_t)snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{");
+    int first = 1;
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+      const char *v = getenv(names[i]);
+      if (v == NULL || *v == '\0') continue;
+      char escaped[4096];
+      size_t el = 0;
+      if (!json_escape_to(escaped, sizeof escaped, v, &el)) return "{\"error\":\"config value too long\"}";
+      w += (size_t)snprintf(reply_buf + w, sizeof reply_buf - w, "%s\"%s\":\"%s\"", first ? "" : ",",
+                            keys[i], escaped);
+      first = 0;
+    }
+    snprintf(reply_buf + w, sizeof reply_buf - w, "}}");
+    return reply_buf;
+  }
+
   if (strcmp(method, "status") == 0) {
     int open = 0;
     for (int i = 0; i < MAX_DOCS; i++) open += docs[i].in_use;
@@ -987,13 +1118,50 @@ static void on_rpc(const char *seq, const char *req, void *arg) {
   reply_to_page(id, dispatch(method, params));
 }
 
+/* Environment the cloud sync needs. Missing any of them is fatal at startup,
+ * before the window opens, with every missing name listed at once. */
+static const char *const REQUIRED_ENV[] = {"MEMOS_BASE_URL", "MEMOS_KEY"};
+
+static void require_env(void) {
+  char missing[256] = "";
+  for (size_t i = 0; i < sizeof REQUIRED_ENV / sizeof REQUIRED_ENV[0]; i++) {
+    const char *v = getenv(REQUIRED_ENV[i]);
+    if (v != NULL && *v != '\0') continue;
+    size_t used = strlen(missing);
+    snprintf(missing + used, sizeof missing - used, "%s%s", used ? ", " : "", REQUIRED_ENV[i]);
+  }
+  if (missing[0] == '\0') return;
+
+  char msg[512];
+  snprintf(msg, sizeof msg,
+           "missing environment variable(s): %s\n\n"
+#ifdef _WIN32
+           "Set them with setx (e.g. setx MEMOS_BASE_URL http://host:5230), then start "
+           "text-edit again from a new session."
+#else
+           "Export them before starting text-edit."
+#endif
+           ,
+           missing);
+  fatal(msg);
+}
+
 int main(void) {
+  require_env();
   core_init();
   cache_init();
   {
     char ignored[RESCAN_CAP];
     rescan(ignored, sizeof ignored);
   }
+
+#ifdef _WIN32
+  /* The page calls the Memos server directly, and Memos sends no CORS headers,
+   * so WebView2 would block every request. The page is our own embedded HTML
+   * and loads nothing remote, so dropping same-origin checks is contained.
+   * WebView2 reads this variable when the webview is created. */
+  _putenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--disable-web-security");
+#endif
 
   g_window = webview_create(getenv("TEXT_EDIT_DEBUG") != NULL, NULL);
   if (g_window == NULL) {

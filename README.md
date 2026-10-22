@@ -3,13 +3,13 @@
 Cross-platform desktop text editor. C host, delta arithmetic compiled by
 [scriptc](https://scriptc.dev).
 
-Each document is `bodies/<id>.md` under the cache root, and the directory
+Each document is `memos/<id>.md` under the cache root, and the directory
 listing is the document list. Ids are `local-<random>` until a document has a
 cloud memo, then the memo id. Documents have no names: a tab shows the first
 line of the text. Edits are held
 in the page and written after 3 s without typing (a red `*` marks the tab
 meanwhile); Ctrl+S, switching tabs, renaming, closing and the window losing focus write
-immediately. When the window regains focus the host rescans `bodies/`: new
+immediately. When the window regains focus the host rescans `memos/`: new
 files open, deleted ones close, and files changed elsewhere reload. Nothing
 polls.
 
@@ -51,6 +51,11 @@ Linux needs WebKitGTK; Windows needs WebView2 and `libwebview.dll` beside the
 executable. `TEXT_EDIT_CACHE` selects the cache root, defaulting to
 `~/.cache/text-edit`.
 
+Required: `MEMOS_BASE_URL` (e.g. `http://host:5230`) and `MEMOS_KEY` (a Memos
+access token). Startup fails with a message naming any that are missing or
+empty. On Windows set them with `setx` and start from a new session. Optional:
+`MEMOS_API_PREFIX` (`/api/v1` by default; `/api` for newer Memos).
+
 ## Layout
 
 ```
@@ -67,7 +72,8 @@ ui/
   main.ts       tabs, editor mount, rpc() client
   index.html    page shell
   panic.ts      panic / assert / run / describe
-  usememos_api.ts  Memos REST client (not wired to sync yet)
+  usememos_api.ts  Memos REST client
+  browser.ts    paginated memo viewer (Browse); click an id to open it
   build.ts      bundles ui/ -> native/ui_html.h
 ```
 

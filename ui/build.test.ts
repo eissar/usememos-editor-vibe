@@ -17,3 +17,7 @@ test("page has exactly one script pair and no nested tags", () => {
 test("inlined script contains no replacement-pattern leaks", () => {
   expect(header).not.toContain('src=\\"./main.ts\\"');
 });
+
+test("ui_html.h contains no trigraphs", () => {
+  expect(header).not.toMatch(/\?\?[=/'()!<>\-]/);
+});

@@ -53,6 +53,12 @@ export interface ListOptions {
   filter?: string;
 }
 
+export interface MemoPage {
+  memos: Memo[];
+  /* Empty on the last page. */
+  nextPageToken: string;
+}
+
 const DEFAULT_PREFIX = "/api/v1";
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -85,25 +91,30 @@ export class MemosClient {
   private readonly token: string;
   private readonly timeoutMs: number;
   private readonly fetchFn: typeof fetch;
+  private user: User | null = null;
 
   constructor(config: MemosConfig) {
     this.base = config.baseUrl.replace(/\/+$/, "") + (config.apiPrefix ?? DEFAULT_PREFIX);
     this.token = config.token;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.fetchFn = config.fetch ?? fetch;
+    // Wrapped, not stored: browsers reject a bare `fetch` called as a method
+    // of another object ("Illegal invocation").
+    this.fetchFn = config.fetch ?? ((input, init) => fetch(input, init));
   }
 
-  /* GET auth/me */
+  /* GET auth/me; cached after the first success. */
   async me(): Promise<Result<User>> {
+    if (this.user !== null) return { ok: true, value: this.user };
     const reply = await this.request("GET", "/auth/me");
     if (!reply.ok) return reply;
     const user = (reply.value as { user?: Partial<User> } | null)?.user;
     if (typeof user?.name !== "string") return malformed("auth/me has no user name");
-    return { ok: true, value: { name: user.name } };
+    this.user = { name: user.name };
+    return { ok: true, value: this.user };
   }
 
-  /* GET memos, following nextPageToken until the last page. */
-  async listMemos(options: ListOptions = {}): Promise<Result<Memo[]>> {
+  /* GET memos, one page. Pass the previous page's nextPageToken to continue. */
+  async listMemosPage(options: ListOptions = {}, pageToken = ""): Promise<Result<MemoPage>> {
     let parent = options.parent;
     if (parent === undefined) {
       const user = await this.me();
@@ -117,22 +128,27 @@ export class MemosClient {
       pageSize: String(options.pageSize ?? 100),
     });
     if (options.filter !== undefined) query.set("filter", options.filter);
+    if (pageToken) query.set("pageToken", pageToken);
 
+    const reply = await this.request("GET", `/memos?${query}`);
+    if (!reply.ok) return reply;
+    const page = reply.value as { memos?: unknown; nextPageToken?: unknown } | null;
+    const items = page?.memos ?? [];
+    if (!Array.isArray(items) || !items.every(isMemo)) return malformed("memos list");
+    const next = typeof page?.nextPageToken === "string" ? page.nextPageToken : "";
+    return { ok: true, value: { memos: items, nextPageToken: next } };
+  }
+
+  /* GET memos, following nextPageToken until the last page. */
+  async listMemos(options: ListOptions = {}): Promise<Result<Memo[]>> {
     const memos: Memo[] = [];
     let pageToken = "";
     do {
-      if (pageToken) query.set("pageToken", pageToken);
-      else query.delete("pageToken");
-
-      const reply = await this.request("GET", `/memos?${query}`);
-      if (!reply.ok) return reply;
-      const page = reply.value as { memos?: unknown; nextPageToken?: unknown } | null;
-      const items = page?.memos ?? [];
-      if (!Array.isArray(items) || !items.every(isMemo)) return malformed("memos list");
-      memos.push(...items);
-      pageToken = typeof page?.nextPageToken === "string" ? page.nextPageToken : "";
+      const page = await this.listMemosPage(options, pageToken);
+      if (!page.ok) return page;
+      memos.push(...page.value.memos);
+      pageToken = page.value.nextPageToken;
     } while (pageToken);
-
     return { ok: true, value: memos };
   }
 

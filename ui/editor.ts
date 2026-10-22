@@ -64,6 +64,25 @@ export const editKeymap: Extension = keymap.of([
 
 export const indentUnit = [EditorState.tabSize.of(2)];
 
+/* Byte length of `s` encoded as UTF-8, without encoding it. */
+export function utf8Length(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      const d = s.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) {
+        n += 4;
+        i++;
+      } else n += 3;
+    } else n += 3;
+  }
+  return n;
+}
+
+/* Offsets and lengths are UTF-8 bytes. */
 export interface EditRange {
   from: number;
   to: number;
@@ -89,12 +108,17 @@ export function makeEditorState(
     ...(opts.readOnly ? [EditorState.changeFilter.of(() => false)] : []),
     EditorState.transactionExtender.of((tr) => {
       if (tr.docChanged && opts.onChange) {
+        // The host stores UTF-8 and splices bytes, while CodeMirror counts
+        // UTF-16 units, so every offset and length is converted to bytes.
+        const before = tr.startState.doc;
         const ranges: EditRange[] = [];
         tr.changes.iterChanges((from, to, _fromB, _toB, inserted) => {
-          ranges.push({ from, to, insert: inserted.toString() });
+          const fromByte = utf8Length(before.sliceString(0, from));
+          const toByte = fromByte + utf8Length(before.sliceString(from, to));
+          ranges.push({ from: fromByte, to: toByte, insert: inserted.toString() });
         });
-        const base = tr.startState.doc.length;
-        const length = tr.state.doc.length;
+        const base = utf8Length(before.toString());
+        const length = utf8Length(tr.state.doc.toString());
         const apply = opts.onChange;
         queueMicrotask(() => apply(ranges, base, length));
       }
