@@ -48,6 +48,7 @@ void *webview_get_window(webview_t *w);
 void webview_eval(webview_t *w, const char *js);
 void webview_bind(webview_t *w, const char *name, webview_bind_cb fn, void *arg);
 void webview_return(webview_t *w, const char *seq, int status, const char *result);
+int webview_dispatch(webview_t *w, void (*fn)(webview_t *w, void *arg), void *arg);
 
 /* Compiled core (ScriptC). Scalar ABI only; negative codes are masked.
  *
@@ -746,16 +747,43 @@ static void js_escape_single(char *out, size_t cap, const char *in) {
   out[w] = '\0';
 }
 
-/* Delivers a reply to the page. webview_return answers the native caller of the
- * bound function, which the page never sees, so the reply has to be evaluated
- * in the document instead. */
+/* Payload for a reply that must run on the UI thread. */
+typedef struct {
+  char *script;
+} eval_job;
+
+static void eval_on_main(webview_t *w, void *arg) {
+  eval_job *job = (eval_job *)arg;
+  webview_eval(w, job->script);
+  free(job->script);
+  free(job);
+}
+
+/*
+ * Delivers a reply to the page.
+ *
+ * webview_bind callbacks run on the webview's own callback thread, where
+ * webview_eval does not execute (the UI thread owns the document), so the eval
+ * is posted through webview_dispatch instead. Evaluating directly there was the
+ * reason every reply was lost and every call timed out.
+ */
 static void reply_to_page(int64_t id, const char *json) {
-  char escaped[1 << 16];
+  char escaped[(1 << 16) + 64];
   js_escape_single(escaped, sizeof escaped, json);
 
-  char script[(1 << 16) + 128];
-  snprintf(script, sizeof script, "window.rpc._reply(%lld,'%s')", (long long)id, escaped);
-  webview_eval(g_window, script);
+  size_t need = strlen(escaped) + 64;
+  eval_job *job = malloc(sizeof *job);
+  if (job == NULL) die("out of memory");
+  job->script = malloc(need);
+  if (job->script == NULL) die("out of memory");
+
+  snprintf(job->script, need, "window.rpc._reply(%lld,'%s')", (long long)id, escaped);
+
+  if (webview_dispatch(g_window, eval_on_main, job) != 0) {
+    free(job->script);
+    free(job);
+    die("could not queue a reply for the page");
+  }
 }
 
 static void on_rpc(const char *seq, const char *req, void *arg) {
