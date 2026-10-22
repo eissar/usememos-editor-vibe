@@ -1,7 +1,7 @@
 import { EditorView } from "@codemirror/view";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { makeEditorState, type EditRange } from "./editor.ts";
-import { parseReplyObject, panic, run } from "./panic.ts";
+import { assert, onAssert, parseReplyObject, run } from "./panic.ts";
 
 type RpcFn = (payload: string) => string;
 declare global {
@@ -53,6 +53,42 @@ function isDocId(value: unknown): value is { id: string } {
   return typeof (value as { id?: unknown } | null)?.id === "string";
 }
 
+function renderFailure(reason: string): void {
+  const box = document.getElementById("fatal");
+  if (box !== null) {
+    box.textContent += `\n${reason}`;
+    return;
+  }
+
+  const panel = document.createElement("pre");
+  panel.id = "fatal";
+  panel.textContent = `text-edit: ${reason}`;
+  panel.style.cssText =
+    "position:fixed;inset:0;margin:0;padding:16px;z-index:2147483647;" +
+    "background:#16181d;color:#e06c75;font:13px/1.5 ui-monospace,monospace;" +
+    "white-space:pre-wrap;overflow:auto";
+  (document.body ?? document.documentElement).append(panel);
+}
+
+onAssert((reason) => {
+  console.error(reason);
+  const status = document.getElementById("status");
+  if (status !== null) {
+    status.textContent = `error: ${reason}`;
+    status.style.color = "var(--bad)";
+    return;
+  }
+  renderFailure(reason);
+});
+
+window.addEventListener("error", (event) => {
+  renderFailure(String(event.error ?? event.message));
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  renderFailure(String(event.reason));
+});
+
 interface DocSummary {
   id: string;
   name: string;
@@ -61,7 +97,7 @@ interface DocSummary {
 
 function element<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
-  if (found === null) panic(`missing element ${selector}`);
+  assert(found !== null, `missing element ${selector}`);
   return found;
 }
 
@@ -147,7 +183,7 @@ function renderTabs() {
 
 async function activate(id: string) {
   const reply = await rpc<unknown>("open", { id });
-  if (!isDocText(reply)) panic("open: reply has no text");
+  assert(isDocText(reply), "open: reply has no text");
   activeId = id;
   emptyEl.remove();
 
@@ -184,7 +220,7 @@ async function closeDoc(id: string) {
 
 async function refresh() {
   const listed = await rpc<unknown>("list");
-  if (!Array.isArray(listed)) panic("list: reply is not an array");
+  assert(Array.isArray(listed), "list: reply is not an array");
   docs = listed as DocSummary[];
   if (!activeId && docs.length) await activate(docs[0]!.id);
   if (docs.length === 0) showEmpty();
@@ -193,7 +229,7 @@ async function refresh() {
 
 async function newDocument() {
   const reply = await rpc<unknown>("create", { name: "untitled.txt" });
-  if (!isDocId(reply)) panic("create: reply has no id");
+  assert(isDocId(reply), "create: reply has no id");
   await refresh();
   await activate(reply.id);
 }
