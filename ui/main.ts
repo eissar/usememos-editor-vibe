@@ -99,7 +99,7 @@ function isDocId(value: unknown): value is { id: string } {
 
 interface DocSummary {
   id: string;
-  name: string;
+  title: string;
   synced: boolean;
 }
 
@@ -203,7 +203,8 @@ async function flushEdits(id: string): Promise<void> {
   })();
   await q.writing;
   scheduleSync(id);
-  renderTabs();
+  // The label is the first line, so it can change with any save.
+  await refresh();
 }
 
 /*
@@ -271,74 +272,14 @@ function statusText(): string {
   return parts.join(" | ");
 }
 
-/* Set while a tab label is being edited, so a refresh does not
- * re-render the strip out from under the cursor. */
-let renaming = false;
-
-async function renameDoc(id: string, name: string) {
-  const trimmed = name.trim();
-  if (trimmed === "" || trimmed === id) {
-    renderTabs();
-    return;
-  }
-  await flushEdits(id);
-  await reportRefusal(async () => {
-    const reply = await rpc<unknown>("rename", { id, name: trimmed });
-    assert(isDocId(reply), "rename: reply has no id");
-    editState.delete(id);
-    forgetSync(id);
-    if (activeId === id) {
-      activeId = null;
-      await activate(reply.id);
-    }
-    await refresh();
-  });
-}
-
-function beginRename(label: HTMLElement, id: string) {
-  renaming = true;
-  label.contentEditable = "true";
-  label.spellcheck = false;
-  label.focus();
-  getSelection()?.selectAllChildren(label);
-
-  let done = false;
-  const finish = (commit: boolean) => {
-    if (done) return;
-    done = true;
-    label.contentEditable = "false";
-    renaming = false;
-    const name = label.textContent ?? "";
-    if (commit) run(renameDoc, id, name);
-    else renderTabs();
-  };
-  label.addEventListener("keydown", (e) => {
-    e.stopPropagation();
-    if (e.key === "Enter") {
-      e.preventDefault();
-      finish(true);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      finish(false);
-    }
-  });
-  label.addEventListener("blur", () => finish(true), { once: true });
-}
-
 function renderTabs() {
-  if (renaming) return;
   tabsEl.replaceChildren(
     ...docs.map((d) => {
       const tab = document.createElement("div");
       tab.className = "tab" + (d.id === activeId ? " active" : "");
       const label = document.createElement("span");
-      label.textContent = d.name || d.id;
-      label.className = "label";
-      label.title = "Double-click to rename";
-      label.addEventListener("dblclick", (ev) => {
-        ev.stopPropagation();
-        beginRename(label, d.id);
-      });
+      label.textContent = d.title || "(empty)";
+      label.className = "label" + (d.title ? "" : " untitled");
       const close = document.createElement("span");
       close.className = "close";
       close.textContent = "x";
@@ -434,7 +375,7 @@ async function refresh() {
 }
 
 async function newDocument() {
-  const reply = await rpc<unknown>("create", { name: "untitled" });
+  const reply = await rpc<unknown>("create");
   assert(isDocId(reply), "create: reply has no id");
   await refresh();
   await activate(reply.id);

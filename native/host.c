@@ -28,11 +28,8 @@
 #include <shellapi.h>
 #define make_dir(p) _mkdir(p)
 #define get_pid() _getpid()
-#define strncasecmp _strnicmp
-#define strcasecmp _stricmp
 #else
 #include <dirent.h>
-#include <strings.h>
 #include <unistd.h>
 #define make_dir(p) mkdir((p), 0700)
 #define get_pid() getpid()
@@ -217,41 +214,27 @@ static void path_join(char *out, size_t cap, const char *a, const char *b) {
 }
 
 /*
- * A document's id is its name, and its body is <root>/bodies/<name>.md.
- *
- * Names must be valid filenames on every platform, so the Windows rules apply
- * everywhere: printable ASCII only, none of <>:"/\|?*, no leading or trailing
- * space or dot, and none of the reserved device names (CON, NUL, COM1, ...).
- * Non-ASCII is refused because the host uses the ANSI file APIs on Windows,
- * which would mangle UTF-8.
+ * A document's id is the file stem in bodies/<id>.md: "local-<random>" until
+ * the document has a cloud memo, then the memo id. Ids are [A-Za-z0-9_-], so
+ * they are valid filenames everywhere and need no escaping in JSON.
  */
-#define MAX_NAME 100
+#define MAX_ID 64
 
-static int name_valid(const char *name) {
-  size_t n = strlen(name);
-  if (n == 0 || n > MAX_NAME) return 0;
-  if (name[0] == ' ' || name[0] == '.' || name[n - 1] == ' ' || name[n - 1] == '.') return 0;
-  for (const unsigned char *p = (const unsigned char *)name; *p != 0; p++) {
-    if (*p < 0x20 || *p > 0x7e) return 0;
-    if (strchr("<>:\"/\\|?*", *p) != NULL) return 0;
-  }
-
-  /* Reserved device names, with or without an extension ("nul.txt" too). */
-  static const char *reserved[] = {"CON", "PRN", "AUX", "NUL"};
-  size_t stem = strcspn(name, ".");
-  for (size_t i = 0; i < sizeof reserved / sizeof reserved[0]; i++) {
-    if (stem == 3 && strncasecmp(name, reserved[i], 3) == 0) return 0;
-  }
-  if (stem == 4 && (strncasecmp(name, "COM", 3) == 0 || strncasecmp(name, "LPT", 3) == 0) &&
-      name[3] >= '1' && name[3] <= '9') {
-    return 0;
+static int id_valid(const char *id) {
+  size_t n = strlen(id);
+  if (n == 0 || n > MAX_ID) return 0;
+  for (const unsigned char *p = (const unsigned char *)id; *p != 0; p++) {
+    if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
+          *p == '_' || *p == '-')) {
+      return 0;
+    }
   }
   return 1;
 }
 
 static int body_path(char *out, size_t cap, const char *id) {
-  if (!name_valid(id)) return 0;
-  char file[MAX_NAME + 8];
+  if (!id_valid(id)) return 0;
+  char file[MAX_ID + 8];
   snprintf(file, sizeof file, "%s.md", id);
   char dir[1200];
   path_join(dir, sizeof dir, cache_root, "bodies");
@@ -382,11 +365,9 @@ static char *read_body(const char *id, size_t *len_out) {
 
 /* --- document table ------------------------------------------------------ */
 
-/* Case-insensitive, as Windows file names are: "Notes" and "notes" are the
- * same document. */
 static doc_t *doc_find(const char *id) {
   for (int i = 0; i < MAX_DOCS; i++) {
-    if (docs[i].in_use && strcasecmp(docs[i].id, id) == 0) return &docs[i];
+    if (docs[i].in_use && strcmp(docs[i].id, id) == 0) return &docs[i];
   }
   return NULL;
 }
@@ -394,7 +375,7 @@ static doc_t *doc_find(const char *id) {
 static int64_t doc_handle(const char *id) {
   /* Handle is the slot index + 1, so 0 is always invalid. */
   for (int i = 0; i < MAX_DOCS; i++) {
-    if (docs[i].in_use && strcasecmp(docs[i].id, id) == 0) return i + 1;
+    if (docs[i].in_use && strcmp(docs[i].id, id) == 0) return i + 1;
   }
   return -1;
 }
@@ -521,12 +502,12 @@ static int cmp_str(const void *a, const void *b) {
 
 static void consider_entry(const char *name, char **ids, int *n) {
   if (*n >= MAX_DOCS || !has_suffix(name, ".md")) return;
-  char id[MAX_NAME + 1];
+  char id[MAX_ID + 1];
   size_t len = strlen(name) - 3;
   if (len == 0 || len >= sizeof id) return;
   memcpy(id, name, len);
   id[len] = '\0';
-  if (!name_valid(id)) return;
+  if (!id_valid(id)) return;
 
   ids[*n] = malloc(len + 1);
   if (ids[*n] == NULL) die("out of memory");
@@ -575,7 +556,7 @@ static void append_id(char *out, size_t cap, size_t *w, int *first, const char *
  * changed on disk are reloaded. Writes the changed and removed ids into `out`
  * as {"changed":[...],"removed":[...]}.
  */
-#define RESCAN_CAP ((size_t)MAX_DOCS * (MAX_NAME + 4) * 2 + 64)
+#define RESCAN_CAP ((size_t)MAX_DOCS * (MAX_ID + 4) * 2 + 64)
 
 static void rescan(char *out, size_t cap) {
   char *ids[MAX_DOCS];
@@ -608,7 +589,7 @@ static void rescan(char *out, size_t cap) {
   for (int i = 0; i < MAX_DOCS; i++) {
     if (!docs[i].in_use) continue;
     int present = 0;
-    for (int j = 0; j < n && !present; j++) present = strcasecmp(ids[j], docs[i].id) == 0;
+    for (int j = 0; j < n && !present; j++) present = strcmp(ids[j], docs[i].id) == 0;
     if (present) continue;
     append_id(out, cap, &w, &first, docs[i].id);
     doc_close(docs[i].id);
@@ -621,6 +602,41 @@ static void rescan(char *out, size_t cap) {
     }
     free(ids[j]);
   }
+}
+
+/* --- labels and ids ------------------------------------------------------ */
+
+#define TITLE_MAX 40
+
+/* A document's label: its first non-blank line, without leading '#' or
+ * spaces, cut to TITLE_MAX bytes (never mid UTF-8 sequence). */
+static void doc_title(const doc_t *d, char *out) {
+  const char *p = d->text;
+  const char *end = d->text + d->len;
+  for (;;) {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '#')) p++;
+    if (p >= end || (*p != '\n' && *p != '\r')) break;
+    p++;
+  }
+  size_t n = 0;
+  while (p + n < end && p[n] != '\n' && p[n] != '\r' && n < TITLE_MAX) n++;
+  while (n > 0 && p + n < end && ((unsigned char)p[n] & 0xC0) == 0x80) n--;
+  while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
+  memcpy(out, p, n);
+  out[n] = '\0';
+}
+
+static void new_local_id(char *out, size_t cap) {
+  static const char alphabet[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+  static unsigned long long state;
+  if (state == 0) state = (unsigned long long)time(NULL) ^ ((unsigned long long)get_pid() << 32);
+  char suffix[11];
+  for (size_t i = 0; i + 1 < sizeof suffix; i++) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    suffix[i] = alphabet[(state >> 33) % 36];
+  }
+  suffix[sizeof suffix - 1] = '\0';
+  snprintf(out, cap, "local-%s", suffix);
 }
 
 /* --- dispatch ------------------------------------------------------------ */
@@ -636,14 +652,14 @@ static const char *dispatch(const char *method, const char *params) {
     int first = 1;
     for (int i = 0; i < MAX_DOCS; i++) {
       if (!docs[i].in_use) continue;
-      char name[800];
-      size_t nl = 0;
-      if (!json_escape_to(name, sizeof name, docs[i].id, &nl)) {
-        snprintf(name, sizeof name, "%s", docs[i].id);
-      }
+      char title[TITLE_MAX + 1], escaped[TITLE_MAX * 6 + 1];
+      size_t el = 0;
+      doc_title(&docs[i], title);
+      if (!json_escape_to(escaped, sizeof escaped, title, &el)) escaped[0] = '\0';
       w += snprintf(reply_buf + w, sizeof reply_buf - w,
-                    "%s{\"id\":\"%s\",\"name\":\"%s\",\"synced\":%s,\"length\":%zu}",
-                    first ? "" : ",", docs[i].id, name, docs[i].synced ? "true" : "false", docs[i].len);
+                    "%s{\"id\":\"%s\",\"title\":\"%s\",\"synced\":%s,\"length\":%zu}",
+                    first ? "" : ",", docs[i].id, escaped, docs[i].synced ? "true" : "false",
+                    docs[i].len);
       first = 0;
     }
     snprintf(reply_buf + w, sizeof reply_buf - w, "]}");
@@ -651,66 +667,14 @@ static const char *dispatch(const char *method, const char *params) {
   }
 
   if (strcmp(method, "create") == 0) {
-    char base[MAX_NAME + 1];
-    if (!json_str(params, "name", base, sizeof base) || !name_valid(base)) {
-      snprintf(base, sizeof base, "untitled");
-    }
-
-    /* First free name of "base", "base 2", "base 3", ... */
-    char id[MAX_NAME + 16];
-    char path[1300];
-    int found = 0;
-    for (int k = 1; k < 10000 && !found; k++) {
-      if (k == 1) snprintf(id, sizeof id, "%s", base);
-      else snprintf(id, sizeof id, "%s %d", base, k);
-      if (!body_path(path, sizeof path, id)) continue;
-      found = doc_find(id) == NULL && !file_exists(path);
-    }
-    if (!found) return "{\"error\":\"no free name\"}";
+    char id[MAX_ID + 1];
+    do new_local_id(id, sizeof id);
+    while (doc_find(id) != NULL);
 
     doc_t *d = doc_open(id);
     if (d == NULL) return "{\"error\":\"cannot create\"}";
 
     snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"id\":\"%s\"}}", id);
-    return reply_buf;
-  }
-
-  if (strcmp(method, "rename") == 0) {
-    char id[MAX_NAME + 16], to[256];
-    if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
-    if (!json_str(params, "name", to, sizeof to)) return "{\"error\":\"missing name\"}";
-    doc_t *d = doc_find(id);
-    if (d == NULL) return "{\"error\":\"unknown doc\"}";
-    if (!name_valid(to)) {
-      return "{\"error\":\"invalid name: use letters, digits and spaces; not <>:\\\"/\\\\|?* or a trailing dot\"}";
-    }
-
-    char from_path[1300], to_path[1300];
-    if (!body_path(from_path, sizeof from_path, d->id)) return "{\"error\":\"bad id\"}";
-    if (!body_path(to_path, sizeof to_path, to)) return "{\"error\":\"invalid name\"}";
-
-    /* A case-only change ("notes" -> "Notes") is the same file on Windows and
-     * must not be treated as a collision with itself. */
-    int same_doc = strcasecmp(d->id, to) == 0;
-    if (!same_doc && (doc_find(to) != NULL || file_exists(to_path))) {
-      return "{\"error\":\"a document with that name already exists\"}";
-    }
-
-    if (strcmp(d->id, to) != 0) {
-      /* Flush first so the renamed file carries the latest text. */
-      if (!write_atomic_body(d->id)) return "{\"error\":\"write failed\"}";
-#ifdef _WIN32
-      if (!MoveFileExA(from_path, to_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-#else
-      if (rename(from_path, to_path) != 0) {
-#endif
-        return "{\"error\":\"rename failed\"}";
-      }
-      snprintf(d->id, sizeof d->id, "%s", to);
-      body_stat(d->id, &d->disk_mtime, &d->disk_size);
-    }
-
-    snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"id\":\"%s\"}}", d->id);
     return reply_buf;
   }
 

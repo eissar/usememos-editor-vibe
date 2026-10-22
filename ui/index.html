@@ -37,6 +37,7 @@
       }
       .tab:hover { background: #262a33; }
       .tab.active { background: var(--bg); color: var(--fg); border-color: var(--accent); }
+      .tab .label.untitled { font-style: italic; }
       .tab .marks { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre; display: inline-flex; }
       .tab .marks > span { display: inline-block; width: 1ch; text-align: center; }
       .tab .sync { color: var(--dim); }
@@ -84,7 +85,6 @@
       <span><span class="k">Ctrl+W</span> close (deletes; needs sync)</span>
       <span><span class="k">Ctrl+N</span> new</span>
       <span><span class="k">Ctrl+Tab</span> next tab</span>
-      <span><span class="k">double-click tab</span> rename</span>
       <button id="new-doc">New</button>
       <button id="reveal">Cache folder</button>
     </footer>

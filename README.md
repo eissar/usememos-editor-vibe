@@ -3,8 +3,10 @@
 Cross-platform desktop text editor. C host, delta arithmetic compiled by
 [scriptc](https://scriptc.dev).
 
-Each document is `bodies/<name>.md` under the cache root; the directory listing
-is the document list and renaming a document renames its file. Edits are held
+Each document is `bodies/<id>.md` under the cache root, and the directory
+listing is the document list. Ids are `local-<random>` until a document has a
+cloud memo, then the memo id. Documents have no names: a tab shows the first
+line of the text. Edits are held
 in the page and written after 3 s without typing (a red `*` marks the tab
 meanwhile); Ctrl+S, switching tabs, renaming, closing and the window losing focus write
 immediately. When the window regains focus the host rescans `bodies/`: new
