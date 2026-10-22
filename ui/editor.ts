@@ -53,7 +53,7 @@ export interface EditRange {
 export function makeEditorState(
   doc: string,
   opts: {
-    onChange?: (ranges: EditRange[], length: number) => void;
+    onChange?: (ranges: EditRange[], baseLength: number, length: number) => void;
     readOnly?: boolean;
     withView?: boolean;
   } = {},
@@ -73,8 +73,10 @@ export function makeEditorState(
         tr.changes.iterChanges((from, to, _fromB, _toB, inserted) => {
           ranges.push({ from, to, insert: inserted.toString() });
         });
+        const base = tr.startState.doc.length;
         const length = tr.state.doc.length;
-        queueMicrotask(() => opts.onChange!(ranges, length));
+        const apply = opts.onChange;
+        queueMicrotask(() => apply(ranges, base, length));
       }
       return null;
     }),

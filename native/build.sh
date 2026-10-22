@@ -32,8 +32,12 @@ case "$target" in
   [ -f "$SCRIPTC_WIN" ] || { echo "missing $SCRIPTC_WIN" >&2; exit 1; }
   chmod +x "$SCRIPTC_WIN" 2>/dev/null || true
 
+  # Remove the archive first: scriptc exiting 0 without rewriting it would
+  # otherwise link the previous build while reporting success.
+  rm -f .scriptc/abi.lib.a
   printf 'compiling core (COFF, under wine)\n'
   wine "$SCRIPTC_WIN" build --lib --profile profile.json >/dev/null
+  [ -s .scriptc/abi.lib.a ] || { echo "scriptc produced no archive" >&2; exit 1; }
   work=.win-build; rm -rf "$work"; mkdir -p "$work"
   ( cd "$work" && ar x ../.scriptc/abi.lib.a )
 
@@ -66,8 +70,12 @@ case "$target" in
   ;;
 
 *)
+  # Remove the archive first: scriptc exiting 0 without rewriting it would
+  # otherwise link the previous build while reporting success.
+  rm -f .scriptc/abi.lib.a
   printf 'compiling core\n'
   "$SCRIPTC" build --lib --profile profile.json >/dev/null
+  [ -s .scriptc/abi.lib.a ] || { echo "scriptc produced no archive" >&2; exit 1; }
 
   WV=${WEBVIEW_LIB:-vendor/libwebview-x64.so}
   [ -f "$WV" ] || { echo "missing $WV (set WEBVIEW_LIB)" >&2; exit 1; }
@@ -91,4 +99,4 @@ case "$target" in
   ;;
 esac
 
-ls -lh ../dist/ 2>/dev/null | tail -2
+ls -lh ../dist/ | tail -2

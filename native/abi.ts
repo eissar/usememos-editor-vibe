@@ -6,16 +6,18 @@
  * decides whether a batch is applicable and what length it produces, which is
  * the part worth compiling.
  *
- * Every export is scalar-in, scalar-out: the ABI cannot carry pointers across
- * hosts, and every i64 return is masked so its range is provable.
+ * Every export is scalar-in, scalar-out. Inputs are validated before any
+ * arithmetic, because `& 0xffffffff` is signed int32 in JS: masking a bad value
+ * silently produces a plausible-looking negative instead of a reject.
  */
-
-const MASK = 0xffffffff;
 
 export const OK = 0;
 export const ERR_DOC = 1;
 export const ERR_RANGE = 2;
 export const ERR_DRIFT = 3;
+
+/** Largest length or offset the ABI can carry without ambiguity. */
+const LIMIT = 0x7fffffff;
 
 interface Hit {
   readonly from: number;
@@ -29,11 +31,14 @@ interface HitList {
 
 const tables = new Map<number, HitList>();
 
-function whole(n: number): number {
-  return Math.floor(n) & MASK;
+function valid(n: number): boolean {
+  return n >= 0 && n <= LIMIT;
 }
 
-/** Ascending by `from`. Batches are small (per-keystroke until coalesced). */
+function count(n: number): number {
+  return n < 0 ? 0 : Math.floor(n);
+}
+
 function ordered(items: Hit[]): Hit[] {
   const out: Hit[] = [];
   for (const h of items) out.push(h);
@@ -50,85 +55,88 @@ function ordered(items: Hit[]): Hit[] {
   return out;
 }
 
-function listFor(ctx: number): HitList {
-  const found = tables.get(ctx);
-  if (found !== undefined) return found;
-  const fresh: HitList = { items: [] };
-  tables.set(ctx, fresh);
-  return fresh;
-}
-
-/** Register a slot. `ctx` is the host's handle for one document. */
+/**
+ * Register a slot and return the handle, which is the context itself. Returning
+ * anything else would let a caller address a different document. Re-opening an
+ * existing slot is rejected rather than silently discarding its queue.
+ */
 export function ctxOpen(ctx: number): number {
+  if (!valid(ctx)) return ERR_DOC | 0;
+  if (tables.has(ctx)) return ERR_DOC | 0;
   tables.set(ctx, { items: [] });
-  return Math.floor(tables.size) & MASK;
+  return ctx | 0;
 }
 
 export function ctxClose(ctx: number): number {
-  return Math.floor(tables.delete(ctx) ? 1 : 0) & MASK;
+  if (!valid(ctx)) return ERR_DOC | 0;
+  return (tables.delete(ctx) ? OK : ERR_DOC) | 0;
 }
 
 export function ctxCount(): number {
-  return Math.floor(tables.size) & MASK;
+  return tables.size | 0;
 }
 
-/** Queue one range. Rejects inverted ranges outright. */
+/**
+ * Queue one range. Every argument is validated first: a negative or fractional
+ * offset, or a negative insert length, would otherwise mask to a huge value and
+ * be accepted.
+ */
 export function push(ctx: number, from: number, to: number, insertLen: number): number {
-  if (from > to) return Math.floor(ERR_RANGE) & MASK;
-  const list = listFor(ctx);
-  list.items.push({ from: whole(from), to: whole(to), insertLen: whole(insertLen) });
-  return 0;
+  if (!valid(ctx)) return ERR_DOC | 0;
+  const found = tables.get(ctx);
+  if (found === undefined) return ERR_DOC | 0;
+  if (!valid(from) || !valid(to) || !valid(insertLen)) return ERR_RANGE | 0;
+  if (from > to) return ERR_RANGE | 0;
+
+  found.items.push({ from, to, insertLen });
+  return OK | 0;
 }
 
 export function clear(ctx: number): number {
-  listFor(ctx).items = [];
-  return 0;
+  if (!valid(ctx)) return ERR_DOC | 0;
+  const found = tables.get(ctx);
+  if (found === undefined) return ERR_DOC | 0;
+  found.items = [];
+  return OK | 0;
 }
 
 /**
- * Apply a batch to `baseLen` and report the resulting length.
- *
- * Returns MASK when the batch is not applicable (overlap or inversion), which
- * callers treat as a hard reject: a partially applied batch would corrupt the
- * document.
+ * Apply a batch to `baseLen`. Returns the resulting length, or a negative error
+ * code. Overlap, out-of-range offsets and length overflow are all rejects: a
+ * partially applied batch would corrupt the document.
  */
 function apply(ctx: number, baseLen: number): number {
   const found = tables.get(ctx);
-  if (found === undefined) return Math.floor(MASK) & MASK;
+  if (found === undefined) return -ERR_DOC;
+  if (!valid(baseLen)) return -ERR_RANGE;
 
   const items = ordered(found.items);
-  let length = whole(baseLen);
+  let length = baseLen;
   let last = 0;
 
   for (const hit of items) {
-    if (hit.from < last) return Math.floor(MASK) & MASK;
-    if (hit.to < hit.from) return Math.floor(MASK) & MASK;
-    length = whole(length - (hit.to - hit.from) + hit.insertLen);
+    if (hit.from < last) return -ERR_RANGE;
+    if (hit.to < hit.from) return -ERR_RANGE;
+    if (hit.to > baseLen) return -ERR_RANGE;
+
+    length = length - (hit.to - hit.from) + hit.insertLen;
+    if (!valid(length)) return -ERR_RANGE;
     last = hit.to;
   }
 
-  return length < 0 ? 0 : Math.floor(length) & MASK;
+  return length < 0 || length > LIMIT ? -ERR_RANGE : length | 0;
 }
 
 /**
- * Validate that the batch yields exactly `expected`. Distinguishing drift from
- * a range violation matters: drift is a stale batch, a range error is a
- * frontend bug.
+ * Validate that the batch yields exactly `expected`. Drift and a range
+ * violation stay distinct: drift is a stale batch, a range error is a frontend
+ * bug, and the host recovers from them differently.
  */
 export function validate(ctx: number, baseLen: number, expected: number): number {
-  const found = tables.get(ctx);
-  if (found === undefined) return Math.floor(ERR_DOC) & MASK;
-
-  const items = ordered(found.items);
-  let last = 0;
-  for (const hit of items) {
-    if (hit.to < hit.from) return Math.floor(ERR_RANGE) & MASK;
-    if (hit.from < last) return Math.floor(ERR_RANGE) & MASK;
-    last = hit.to;
-  }
+  if (!valid(ctx)) return ERR_DOC | 0;
+  if (!valid(baseLen) || !valid(expected)) return ERR_RANGE | 0;
 
   const predicted = apply(ctx, baseLen);
-  if (predicted === MASK) return Math.floor(ERR_RANGE) & MASK;
-  return Math.floor(predicted === whole(expected) ? 0 : ERR_DRIFT) & MASK;
+  if (predicted < 0) return (predicted === -ERR_RANGE ? ERR_RANGE : ERR_DOC) | 0;
+  return (predicted === expected ? 0 : ERR_DRIFT) | 0;
 }
-

@@ -11,21 +11,46 @@ declare global {
 }
 
 let seq = 0;
-const inflight = new Map<number, { resolve: (value: unknown) => void }>();
+
+interface Pending {
+  resolve: (value: unknown) => void;
+  reject: (reason: Error) => void;
+}
+
+const inflight = new Map<number, Pending>();
 
 window.rpc._reply = (id, result) => {
   const entry = inflight.get(id);
-  if (!entry) return;
+  if (entry === undefined) return;
   inflight.delete(id);
-  entry.resolve(parseJson(result));
+
+  const parsed = parseJson(result);
+  if (!parsed.ok) {
+    entry.reject(new Error("rpc: malformed reply"));
+    return;
+  }
+  entry.resolve(parsed.value);
 };
 
 function rpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
   const id = ++seq;
-  return new Promise<T>((resolve) => {
-    inflight.set(id, { resolve: (value) => resolve(value as T) });
-    window.rpc(JSON.stringify({ id, method, params }));
+  return new Promise<T>((resolve, reject) => {
+    inflight.set(id, { resolve: (value) => resolve(value as T), reject });
+    try {
+      window.rpc(JSON.stringify({ id, method, params }));
+    } catch (error) {
+      inflight.delete(id);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
   });
+}
+
+function isDocText(value: unknown): value is { text: string } {
+  return typeof (value as { text?: unknown } | null)?.text === "string";
+}
+
+function isDocId(value: unknown): value is { id: string } {
+  return typeof (value as { id?: unknown } | null)?.id === "string";
 }
 
 interface DocSummary {
@@ -54,23 +79,39 @@ let view: EditorView | null = null;
 let activeId: string | null = null;
 let docs: DocSummary[] = [];
 
-const editState = new Map<string, { pending: EditRange[]; length: number; inFlight: boolean }>();
+const editState = new Map<string, EditBatch>();
 
-function queueEdit(id: string, ranges: EditRange[], length: number) {
-  const entry = editState.get(id) ?? { pending: [], length, inFlight: false };
+interface EditBatch {
+  pending: EditRange[];
+  baseLength: number;
+  length: number;
+  inFlight: boolean;
+}
+
+function queueEdit(id: string, ranges: EditRange[], baseLength: number, length: number) {
+  const entry: EditBatch = editState.get(id) ?? { pending: [], baseLength, length, inFlight: false };
   entry.pending.push(...ranges);
+  entry.baseLength = baseLength;
   entry.length = length;
   editState.set(id, entry);
   if (entry.inFlight) return;
   entry.inFlight = true;
 
   run(async () => {
-    while (entry.pending.length > 0) {
-      const batch = entry.pending;
-      entry.pending = [];
-      await rpc("edit", { id, ranges: batch, length: entry.length });
+    try {
+      while (entry.pending.length > 0) {
+        const batch = entry.pending;
+        entry.pending = [];
+        await rpc("edit", {
+          id,
+          ranges: batch,
+          baseLength: entry.baseLength,
+          length: entry.length,
+        });
+      }
+    } finally {
+      entry.inFlight = false;
     }
-    entry.inFlight = false;
   });
 }
 
@@ -105,14 +146,15 @@ function renderTabs() {
 }
 
 async function activate(id: string) {
-  const doc = await rpc<{ text: string }>("open", { id });
+  const reply = await rpc<unknown>("open", { id });
+  if (!isDocText(reply)) panic("open: reply has no text");
   activeId = id;
   emptyEl.remove();
 
-  const state = makeEditorState(doc.text, {
+  const state = makeEditorState(reply.text, {
     withView: true,
-    onChange: (ranges, length) => {
-      queueEdit(id, ranges, length);
+    onChange: (ranges, baseLength, length) => {
+      queueEdit(id, ranges, baseLength, length);
     },
   });
 
@@ -141,16 +183,19 @@ async function closeDoc(id: string) {
 }
 
 async function refresh() {
-  docs = await rpc<DocSummary[]>("list");
+  const listed = await rpc<unknown>("list");
+  if (!Array.isArray(listed)) panic("list: reply is not an array");
+  docs = listed as DocSummary[];
   if (!activeId && docs.length) await activate(docs[0]!.id);
   if (docs.length === 0) showEmpty();
   renderTabs();
 }
 
 async function newDocument() {
-  const doc = await rpc<{ id: string }>("create", { name: "untitled.txt" });
+  const reply = await rpc<unknown>("create", { name: "untitled.txt" });
+  if (!isDocId(reply)) panic("create: reply has no id");
   await refresh();
-  await activate(doc.id);
+  await activate(reply.id);
 }
 
 function showEmpty() {

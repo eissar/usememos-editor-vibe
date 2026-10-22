@@ -94,18 +94,42 @@ static void die(const char *msg) {
 
 /* --- tiny arena-free JSON helpers ---------------------------------------- */
 
-/* Finds "key": in a flat JSON object and returns a pointer just past the colon. */
+/*
+ * Finds "key": and returns a pointer just past the colon.
+ *
+ * Scans member by member rather than strstr, so a document insert containing
+ * `"from":` inside a string value cannot be mistaken for a range field. String
+ * literals are skipped wholesale, escapes included.
+ */
 static const char *json_value(const char *json, const char *key) {
-  char needle[64];
-  snprintf(needle, sizeof needle, "\"%s\"", key);
-  const char *at = strstr(json, needle);
-  if (at == NULL) return NULL;
-  at += strlen(needle);
-  while (*at == ' ' || *at == '\t') at++;
-  if (*at != ':') return NULL;
-  at++;
-  while (*at == ' ' || *at == '\t') at++;
-  return at;
+  size_t key_len = strlen(key);
+  const char *at = json;
+
+  while (*at != '\0') {
+    if (*at == '"') {
+      const char *start = ++at;
+      while (*at != '\0' && *at != '"') {
+        if (*at == '\\' && at[1] != '\0') at++;
+        at++;
+      }
+      size_t len = (size_t)(at - start);
+      if (*at == '"') at++;
+
+      const char *scan = at;
+      while (*scan == ' ' || *scan == '\t') scan++;
+      if (*scan != ':') continue;
+
+      if (len == key_len && strncmp(start, key, key_len) == 0) {
+        scan++;
+        while (*scan == ' ' || *scan == '\t') scan++;
+        return scan;
+      }
+      continue;
+    }
+
+    at++;
+  }
+  return NULL;
 }
 
 static int json_int(const char *json, const char *key, int64_t *out) {
@@ -155,24 +179,36 @@ static void path_join(char *out, size_t cap, const char *a, const char *b) {
   if (n < 0 || (size_t)n >= cap) die("path too long");
 }
 
-/* Percent-encodes anything outside [A-Za-z0-9._-] so an id cannot escape the
- * body directory or collide with the index. */
-static void body_path(char *out, size_t cap, const char *id) {
+/*
+ * Percent-encodes anything outside [A-Za-z0-9._-] so an id cannot escape the
+ * body directory or collide with the index.
+ *
+ * Ids come from the page, so a bad one is an expected failure and returns 0
+ * rather than aborting: "." and ".." are inside the allowed set and would
+ * otherwise resolve to the parent directory.
+ */
+static int body_path(char *out, size_t cap, const char *id) {
+  if (strcmp(id, ".") == 0 || strcmp(id, "..") == 0) return 0;
+
   char safe[512];
   size_t w = 0;
-  for (const char *p = id; *p != '\0' && w + 4 < sizeof safe; p++) {
+  for (const char *p = id; *p != '\0'; p++) {
     unsigned char c = (unsigned char)*p;
     if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
         c == '.' || c == '_' || c == '-') {
+      if (w + 2 > sizeof safe) return 0;
       safe[w++] = (char)c;
     } else {
+      if (w + 4 > sizeof safe) return 0;
       w += (size_t)snprintf(safe + w, sizeof safe - w, "%%%02X", c);
     }
   }
   safe[w] = '\0';
+
   char dir[1200];
   path_join(dir, sizeof dir, cache_root, "bodies");
   path_join(out, cap, dir, safe);
+  return 1;
 }
 
 static int mkdir_p(const char *path) {
@@ -233,31 +269,67 @@ static void index_path(char *out, size_t cap) {
  * rewritten atomically in full. Small enough that rewriting beats incremental
  * updates.
  */
+/* Writes `in` as a JSON string body into `out`, escaping quotes, backslashes and
+ * control bytes. Ids are arbitrary page input, so emitting them raw would
+ * produce an unparseable index -- the one file whose corruption loses every
+ * document. Returns 0 when the destination is too small. */
+static int json_escape_to(char *out, size_t cap, const char *in, size_t *written) {
+  size_t w = 0;
+  for (const unsigned char *p = (const unsigned char *)in; *p != 0; p++) {
+    if (*p == '"' || *p == '\\') {
+      if (w + 3 > cap) return 0;
+      out[w++] = '\\';
+      out[w++] = (char)*p;
+    } else if (*p < 0x20) {
+      if (w + 7 > cap) return 0;
+      w += (size_t)snprintf(out + w, cap - w, "\\u%04x", *p);
+    } else {
+      if (w + 2 > cap) return 0;
+      out[w++] = (char)*p;
+    }
+  }
+  out[w] = '\0';
+  *written = w;
+  return 1;
+}
+
 static void save_index(void) {
   char path[1300];
   index_path(path, sizeof path);
 
-  size_t cap = 4096 + (size_t)MAX_DOCS * 512;
+  size_t cap = 4096 + (size_t)MAX_DOCS * 1024;
   char *buf = malloc(cap);
   if (buf == NULL) die("out of memory");
 
-  size_t w = (size_t)snprintf(buf, cap, "{\"version\":1,\"docs\":{");
+  int w = snprintf(buf, cap, "{\"version\":1,\"docs\":{");
+  if (w < 0) die("index format error");
+
   int first = 1;
   for (int i = 0; i < MAX_DOCS; i++) {
     if (!docs[i].in_use) continue;
-    w += (size_t)snprintf(buf + w, cap - w, "%s\"%s\":{\"id\":\"%s\",\"length\":%zu}",
-                          first ? "" : ",", docs[i].id, docs[i].id, docs[i].len);
+
+    char key[1200];
+    size_t key_len = 0;
+    if (!json_escape_to(key, sizeof key, docs[i].id, &key_len)) die("document id too long");
+
+    int m = snprintf(buf + w, cap - (size_t)w, "%s\"%s\":{\"id\":\"%s\",\"length\":%zu}",
+                     first ? "" : ",", key, key, docs[i].len);
+    if (m < 0 || (size_t)m >= cap - (size_t)w) die("index too large");
+    w += m;
     first = 0;
   }
-  snprintf(buf + w, cap - w, "}}");
 
-  if (!write_atomic(path, buf, strlen(buf))) die("cannot write index.json");
+  int m = snprintf(buf + w, cap - (size_t)w, "}}");
+  if (m < 0 || (size_t)m >= cap - (size_t)w) die("index too large");
+  w += m;
+
+  if (!write_atomic(path, buf, (size_t)w)) die("cannot write index.json");
   free(buf);
 }
 
 static char *read_body(const char *id, size_t *len_out) {
   char path[1300];
-  body_path(path, sizeof path, id);
+  if (!body_path(path, sizeof path, id)) return NULL;
 
   FILE *f = fopen(path, "rb");
   if (f == NULL) return NULL;
@@ -305,7 +377,7 @@ static int write_atomic_body(const char *id) {
   doc_t *d = doc_find(id);
   if (d == NULL) return 0;
   char path[1300];
-  body_path(path, sizeof path, id);
+  if (!body_path(path, sizeof path, id)) return 0;
   return write_atomic(path, d->text, d->len);
 }
 
@@ -313,10 +385,18 @@ static doc_t *doc_open(const char *id) {
   doc_t *found = doc_find(id);
   if (found != NULL) return found;
 
+  /* Check the id maps to a legal body path before claiming a slot, so a bad id
+   * is an open failure rather than a document backed by no file. */
+  char probe[1300];
+  if (!body_path(probe, sizeof probe, id)) return NULL;
+
   for (int i = 0; i < MAX_DOCS; i++) {
     if (docs[i].in_use) continue;
+
+    if (snprintf(docs[i].id, sizeof docs[i].id, "%s", id) >= (int)sizeof docs[i].id) {
+      return NULL;
+    }
     docs[i].in_use = 1;
-    snprintf(docs[i].id, sizeof docs[i].id, "%s", id);
 
     /* A cached body wins over an empty document: the host is a cache of cloud
      * state, and the body is what the user last saw. */
@@ -329,10 +409,19 @@ static doc_t *doc_open(const char *id) {
       docs[i].text = calloc(1, 1);
       if (docs[i].text == NULL) die("out of memory");
       docs[i].len = 0;
-      write_atomic_body(id);
+      if (!write_atomic_body(id)) {
+        free(docs[i].text);
+        memset(&docs[i], 0, sizeof docs[i]);
+        return NULL;
+      }
     }
 
-    core_ctx_open(i + 1);
+    int64_t handle = core_ctx_open(i + 1);
+    if (handle != (int64_t)(i + 1)) {
+      free(docs[i].text);
+      memset(&docs[i], 0, sizeof docs[i]);
+      return NULL;
+    }
     save_index();
     return &docs[i];
   }
@@ -352,7 +441,18 @@ static void doc_close(const char *id) {
 /* Applies ranges whose inserts are already resolved into `insert_text`. */
 static char *splice_with(const char *base, size_t base_len, const range_t *rs,
                          const char *const *inserts, int n, size_t *out_len) {
-  char *buf = malloc(base_len + MAX_TEXT);
+  /* Capacity must cover the base plus every insert, not a fixed slack: a batch
+   * may carry MAX_RANGES inserts of up to MAX_TEXT each, so a constant
+   * base_len + MAX_TEXT allowance overflows the heap. */
+  size_t total_insert = 0;
+  for (int i = 0; i < n; i++) {
+    size_t ins_len = inserts[i] == NULL ? 0 : strlen(inserts[i]);
+    if (total_insert > SIZE_MAX - ins_len) die("insert total overflow");
+    total_insert += ins_len;
+  }
+  if (base_len > SIZE_MAX - total_insert) die("splice size overflow");
+  size_t cap = base_len + total_insert;
+  char *buf = malloc(cap + 1);
   if (buf == NULL) die("out of memory");
 
   size_t at = 0, w = 0;
@@ -363,12 +463,22 @@ static char *splice_with(const char *base, size_t base_len, const range_t *rs,
       free(buf);
       return NULL;
     }
-    while (at < from) buf[w++] = base[at++];
+    while (at < from) {
+      if (w >= cap) { free(buf); return NULL; }
+      buf[w++] = base[at++];
+    }
     const char *ins = inserts[i];
-    while (ins != NULL && *ins != '\0') buf[w++] = *ins++;
+    while (ins != NULL && *ins != '\0') {
+      if (w >= cap) { free(buf); return NULL; }
+      buf[w++] = *ins++;
+    }
     at = to;
   }
-  while (at < base_len) buf[w++] = base[at++];
+  while (at < base_len) {
+    if (w >= cap) { free(buf); return NULL; }
+    buf[w++] = base[at++];
+  }
+  if (w > cap) { free(buf); return NULL; }
   buf[w] = '\0';
   *out_len = w;
   return buf;
@@ -397,7 +507,7 @@ static const char *dispatch(const char *method, const char *params) {
     char id[128];
     if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
     doc_t *d = doc_open(id);
-    if (d == NULL) return "{\"error\":\"too many documents\"}";
+    if (d == NULL) return "{\"error\":\"cannot open\"}";
     snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"length\":%zu}}", d->len);
     return reply_buf;
   }
@@ -405,7 +515,9 @@ static const char *dispatch(const char *method, const char *params) {
   if (strcmp(method, "close") == 0) {
     char id[128];
     if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
-    write_atomic_body(id);
+    if (doc_find(id) != NULL && !write_atomic_body(id)) {
+      return "{\"error\":\"write failed\"}";
+    }
     save_index();
     doc_close(id);
     return "{\"ok\":1,\"value\":{}}";
@@ -418,54 +530,88 @@ static const char *dispatch(const char *method, const char *params) {
     if (d == NULL) return "{\"error\":\"unknown doc\"}";
 
     int64_t claimed = 0;
-    json_int(params, "length", &claimed);
+    if (!json_int(params, "length", &claimed)) return "{\"error\":\"missing length\"}";
 
-    /* Walk the ranges array once, collecting offsets and insert text. */
+    /* The frontend sends the pre-change length alongside the post-change one.
+     * Ranges address the ORIGINAL document, so the base is what we must splice
+     * against -- using the new length would misplace every edit that changed
+     * the document's size. */
+    int64_t base_len = 0;
+    if (json_int(params, "baseLength", &base_len)) {
+      if (base_len != (int64_t)d->len) {
+        return "{\"error\":\"stale\",\"code\":3}";
+      }
+    } else {
+      base_len = (int64_t)d->len;
+    }
+
     range_t rs[MAX_RANGES];
-    char *inserts[MAX_RANGES];
+    char **inserts = calloc(MAX_RANGES, sizeof *inserts);
+    if (inserts == NULL) die("out of memory");
     int n = 0;
 
     const char *at = json_value(params, "ranges");
     if (at == NULL || *at != '[') return "{\"error\":\"missing ranges\"}";
     at++;
 
+    int bad = 0;
     while (*at != '\0' && *at != ']' && n < MAX_RANGES) {
       while (*at == ' ' || *at == ',') at++;
       if (*at == ']') break;
 
       int64_t from = 0, to = 0;
-      char ins[MAX_TEXT];
-      if (!json_int(at, "from", &from)) break;
-      if (!json_int(at, "to", &to)) break;
-      json_str(at, "insert", ins, sizeof ins);
+      char *ins = calloc(1, MAX_TEXT);
+      if (ins == NULL) die("out of memory");
+
+      if (!json_int(at, "from", &from) || !json_int(at, "to", &to)) {
+        free(ins);
+        bad = 1;
+        break;
+      }
+      json_str(at, "insert", ins, MAX_TEXT);
 
       rs[n].from = from;
       rs[n].to = to;
       rs[n].insert_len = (int64_t)strlen(ins);
-      inserts[n] = strdup(ins);
-      if (inserts[n] == NULL) die("out of memory");
+      inserts[n] = ins;
       n++;
 
-      /* advance to the next object */
       const char *next = strchr(at, '}');
-      if (next == NULL) break;
+      if (next == NULL) { bad = 1; break; }
       at = next + 1;
     }
 
+    if (bad || n == 0) {
+      for (int j = 0; j < n; j++) free(inserts[j]);
+      free(inserts);
+      return "{\"error\":\"malformed ranges\"}";
+    }
+
     int64_t handle = doc_handle(id);
-    core_clear(handle);
+    int64_t rc = core_clear(handle);
+    if (rc != ABI_OK) {
+      for (int j = 0; j < n; j++) free(inserts[j]);
+      free(inserts);
+      snprintf(reply_buf, sizeof reply_buf, "{\"error\":\"range\",\"code\":%lld}", (long long)rc);
+      return reply_buf;
+    }
+
     for (int i = 0; i < n; i++) {
-      int64_t rc = core_push(handle, rs[i].from, rs[i].to, rs[i].insert_len);
-      if ((uint64_t)rc != ABI_OK) {
+      rc = core_push(handle, rs[i].from, rs[i].to, rs[i].insert_len);
+      if (rc != ABI_OK) {
         for (int j = 0; j < n; j++) free(inserts[j]);
+        free(inserts);
+        core_clear(handle);
         snprintf(reply_buf, sizeof reply_buf, "{\"error\":\"range\",\"code\":%lld}", (long long)rc);
         return reply_buf;
       }
     }
 
-    int64_t verdict = core_validate(handle, (int64_t)d->len, claimed);
-    if ((uint64_t)verdict != ABI_OK) {
+    int64_t verdict = core_validate(handle, base_len, claimed);
+    if (verdict != ABI_OK) {
       for (int j = 0; j < n; j++) free(inserts[j]);
+      free(inserts);
+      core_clear(handle);
       snprintf(reply_buf, sizeof reply_buf, "{\"error\":\"drift\",\"code\":%lld}", (long long)verdict);
       return reply_buf;
     }
@@ -473,18 +619,36 @@ static const char *dispatch(const char *method, const char *params) {
     size_t new_len = 0;
     char *next_text = splice_with(d->text, d->len, rs, (const char *const *)inserts, n, &new_len);
     for (int j = 0; j < n; j++) free(inserts[j]);
+    free(inserts);
 
     if (next_text == NULL) {
+      core_clear(handle);
       return "{\"error\":\"range\"}";
     }
+    if (new_len != (size_t)claimed) {
+      free(next_text);
+      core_clear(handle);
+      return "{\"error\":\"drift\",\"code\":3}";
+    }
 
-    free(d->text);
+    /* Durability: the body must be on disk before the in-memory copy moves, or
+     * a failed write leaves the host holding text the caller was told was
+     * rejected -- a retry would then apply it twice. */
+    char *previous = d->text;
+    size_t previous_len = d->len;
     d->text = next_text;
     d->len = new_len;
-    core_clear(handle);
 
-    /* Durability contract: once this returns, the bytes are on disk. */
-    if (!write_atomic_body(id)) return "{\"error\":\"write failed\"}";
+    if (!write_atomic_body(id)) {
+      d->text = previous;
+      d->len = previous_len;
+      free(next_text);
+      core_clear(handle);
+      return "{\"error\":\"write failed\"}";
+    }
+
+    free(previous);
+    core_clear(handle);
     save_index();
 
     snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"length\":%zu}}", d->len);
