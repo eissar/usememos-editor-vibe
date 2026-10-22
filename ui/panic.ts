@@ -1,4 +1,12 @@
+let panicked = false;
+
+/*
+ * Halts: replaces the page with the reason. Only the first call renders, so a
+ * panic raised while reporting another cannot hide the original.
+ */
 export function panic(reason: string): never {
+  if (panicked) throw new Error(reason);
+  panicked = true;
   const host = document.body ?? document.documentElement;
   if (host !== null) {
     const panel = document.createElement("pre");
@@ -68,4 +76,15 @@ export function describe(error: unknown): string {
   }
 
   return String(error);
+}
+
+/* Anything that escapes run() (or throws at load) halts with its reason
+ * instead of leaving a dead page. */
+export function installGlobalHandlers(): void {
+  window.addEventListener("error", (e) => {
+    if (!panicked) panic(describe(e.error ?? e.message));
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    if (!panicked) panic(describe(e.reason));
+  });
 }

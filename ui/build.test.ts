@@ -7,11 +7,17 @@ test("ui_html.h is pure ascii", () => {
   expect(bad).toBe("");
 });
 
-test("page has exactly one script pair and no nested tags", () => {
-  const opens = header.match(/<script/g) ?? [];
-  const closes = header.match(/<\/script/g) ?? [];
-  expect(opens.length).toBe(1);
-  expect(closes.length).toBe(1);
+test("the html carries no script; the bundle is a separate literal", () => {
+  const html = header.slice(header.indexOf("UI_HTML ="), header.indexOf("UI_JS ="));
+  expect(html).not.toContain("<script");
+  expect(html).toContain('data-app=\\"text-edit\\"');
+  expect(header).toContain("static const char *UI_JS =");
+});
+
+test("the html stays far below WebView2's 2 MB NavigateToString limit", () => {
+  const html = header.slice(header.indexOf("UI_HTML ="), header.indexOf("UI_JS ="));
+  // UTF-16 doubles it; leave a wide margin.
+  expect(html.length * 2).toBeLessThan(512 * 1024);
 });
 
 test("inlined script contains no replacement-pattern leaks", () => {

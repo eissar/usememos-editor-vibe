@@ -30,26 +30,30 @@
 #define get_pid() _getpid()
 #else
 #include <dirent.h>
+#include <pthread.h>
 #include <unistd.h>
 #define make_dir(p) mkdir((p), 0700)
 #define get_pid() getpid()
 #endif
 
-/* webview C API. No header ships with bindings, so declare the surface used. */
+/* webview 0.12 C API (the vendored version). No header ships with the
+ * binaries, so the surface used is declared here. Every call but create and
+ * get_window returns webview_error_t: 0 is success, negative is failure. */
 typedef struct webview webview_t;
 typedef void (*webview_bind_cb)(const char *seq, const char *req, void *arg);
 
 webview_t *webview_create(int debug, void *window);
-void webview_destroy(webview_t *w);
-void webview_run(webview_t *w);
-void webview_terminate(webview_t *w);
-void webview_set_title(webview_t *w, const char *title);
-void webview_set_size(webview_t *w, int width, int height, int hints);
-void webview_set_html(webview_t *w, const char *html);
+int webview_destroy(webview_t *w);
+int webview_run(webview_t *w);
+int webview_terminate(webview_t *w);
+int webview_set_title(webview_t *w, const char *title);
+int webview_set_size(webview_t *w, int width, int height, int hints);
+int webview_set_html(webview_t *w, const char *html);
+int webview_init(webview_t *w, const char *js);
 void *webview_get_window(webview_t *w);
-void webview_eval(webview_t *w, const char *js);
-void webview_bind(webview_t *w, const char *name, webview_bind_cb fn, void *arg);
-void webview_return(webview_t *w, const char *seq, int status, const char *result);
+int webview_eval(webview_t *w, const char *js);
+int webview_bind(webview_t *w, const char *name, webview_bind_cb fn, void *arg);
+int webview_return(webview_t *w, const char *seq, int status, const char *result);
 int webview_dispatch(webview_t *w, void (*fn)(webview_t *w, void *arg), void *arg);
 
 /* Compiled core (ScriptC). Scalar ABI only; negative codes are masked.
@@ -101,6 +105,8 @@ typedef struct {
 
 static doc_t docs[MAX_DOCS];
 static webview_t *g_window;
+/* Set by the page's `ready` call; read by the startup watchdog thread. */
+static volatile int g_ready;
 
 /*
  * A GUI-subsystem binary has no console, so stderr on double-click goes
@@ -127,6 +133,14 @@ static void fatal(const char *msg) {
 }
 
 static void die(const char *msg) {
+  fatal(msg);
+}
+
+/* Halts with `what` and the code when a webview call reports failure. */
+static void wv_check(int rc, const char *what) {
+  if (rc == 0) return;
+  char msg[256];
+  snprintf(msg, sizeof msg, "webview: %s failed (error %d)", what, rc);
   fatal(msg);
 }
 
@@ -1124,6 +1138,12 @@ static const char *dispatch(const char *method, const char *params) {
     return reply_buf;
   }
 
+  /* The page has rendered and talked to the host; see the watchdog. */
+  if (strcmp(method, "ready") == 0) {
+    g_ready = 1;
+    return "{\"ok\":1,\"value\":{}}";
+  }
+
   if (strcmp(method, "status") == 0) {
     int open = 0;
     for (int i = 0; i < MAX_DOCS; i++) open += docs[i].in_use;
@@ -1172,7 +1192,7 @@ typedef struct {
 
 static void eval_on_main(webview_t *w, void *arg) {
   eval_job *job = (eval_job *)arg;
-  webview_eval(w, job->script);
+  wv_check(webview_eval(w, job->script), "eval");
   free(job->script);
   free(job);
 }
@@ -1206,7 +1226,7 @@ static void on_rpc(const char *seq, const char *req, void *arg) {
   (void)arg;
 
   /* Settle webview's own promise for this call; the real reply goes via _reply. */
-  webview_return(g_window, seq, 0, "null");
+  wv_check(webview_return(g_window, seq, 0, "null"), "return");
 
   /* req is the JSON argument array, e.g. [{"id":1,"method":...}]. */
   int64_t id = 0;
@@ -1226,6 +1246,54 @@ static void on_rpc(const char *seq, const char *req, void *arg) {
 
   reply_to_page(id, dispatch(method, params));
 }
+
+/* --- startup watchdog ---------------------------------------------------- */
+/*
+ * A window that never shows the editor must not just sit there blank. The page
+ * sends `ready` once it has rendered; if that has not happened within
+ * READY_TIMEOUT_S, whatever went wrong (a script that did not load, a webview
+ * that rejected the page) is reported and the process halts.
+ */
+#define READY_TIMEOUT_S 15
+
+
+static void watchdog_fire(webview_t *w, void *arg) {
+  (void)w;
+  (void)arg;
+  if (!g_ready) {
+    fatal("the editor did not start within 15 seconds: the page loaded no script or "
+          "failed before reporting ready. Run with TEXT_EDIT_DEBUG=1 and open the "
+          "webview's developer tools for the cause.");
+  }
+}
+
+#ifdef _WIN32
+static DWORD WINAPI watchdog_thread(LPVOID arg) {
+  (void)arg;
+  Sleep(READY_TIMEOUT_S * 1000);
+  if (!g_ready) webview_dispatch(g_window, watchdog_fire, NULL);
+  return 0;
+}
+
+static void start_watchdog(void) {
+  HANDLE t = CreateThread(NULL, 0, watchdog_thread, NULL, 0, NULL);
+  if (t == NULL) die("could not start the startup watchdog");
+  CloseHandle(t);
+}
+#else
+static void *watchdog_thread(void *arg) {
+  (void)arg;
+  sleep(READY_TIMEOUT_S);
+  if (!g_ready) webview_dispatch(g_window, watchdog_fire, NULL);
+  return NULL;
+}
+
+static void start_watchdog(void) {
+  pthread_t t;
+  if (pthread_create(&t, NULL, watchdog_thread, NULL) != 0) die("could not start the startup watchdog");
+  pthread_detach(t);
+}
+#endif
 
 /* Environment the cloud sync needs. Missing any of them is fatal at startup,
  * before the window opens, with every missing name listed at once. */
@@ -1282,16 +1350,20 @@ int main(void) {
     die("the window was created but has no native handle");
   }
 
-  if (UI_HTML == NULL || UI_HTML[0] == '\0') {
+  if (UI_HTML == NULL || UI_HTML[0] == '\0' || UI_JS == NULL || UI_JS[0] == '\0') {
     die("the embedded UI is empty - ui/build.ts did not run");
   }
 
-  webview_set_title(g_window, "text-edit");
-  webview_set_size(g_window, 1100, 720, 0);
-  webview_bind(g_window, "rpc", on_rpc, NULL);
-  webview_set_html(g_window, UI_HTML);
+  wv_check(webview_set_title(g_window, "text-edit"), "set_title");
+  wv_check(webview_set_size(g_window, 1100, 720, 0), "set_size");
+  wv_check(webview_bind(g_window, "rpc", on_rpc, NULL), "bind");
+  /* The script goes in as an init script, the markup through set_html; see
+   * ui/build.ts for why they are split. */
+  wv_check(webview_init(g_window, UI_JS), "init");
+  wv_check(webview_set_html(g_window, UI_HTML), "set_html");
+  start_watchdog();
 
-  webview_run(g_window);
+  wv_check(webview_run(g_window), "run");
 
   for (int i = 0; i < MAX_DOCS; i++) {
     if (docs[i].in_use) free(docs[i].text);

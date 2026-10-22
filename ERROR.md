@@ -237,3 +237,26 @@ The index is gone. The directory is now the list of documents: each one is
 `bodies/<name>.md`, the name is the id, and `load_bodies()` scans the directory
 at startup. Rename is a file rename. Names follow Windows filename rules
 everywhere and are compared without regard to case.
+
+---
+
+## Blank window on startup
+
+### Cause
+
+Adding every fenced-code language grew the page to 1.7 MB. `webview_set_html`
+is WebView2's `NavigateToString` on Windows, which refuses documents over 2 MB.
+The page is passed as UTF-16, so 1.7 MB of UTF-8 becomes about 3.4 MB.
+webview 0.12 drops that error, so the window stayed blank with no message.
+
+### Fix
+
+- The page ships as two strings: the markup (about 6 KB) through `set_html`,
+  and the script through `webview_init` (an init script, no size limit),
+  started on DOMContentLoaded in the marked document only.
+- Every webview call's return code is checked and fatal on failure; the
+  declarations were `void`.
+- No blank window is possible any more: the markup itself says "Loading...",
+  a script that throws while loading renders its error, uncaught errors and
+  rejections panic, and a host watchdog halts with a message box if the page
+  has not reported `ready` within 15 s.

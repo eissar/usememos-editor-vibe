@@ -10,10 +10,46 @@ import {
   rectangularSelection,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { bracketMatching, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
+import { bracketMatching, foldGutter, foldKeymap, HighlightStyle, indentOnInput, syntaxHighlighting } from "@codemirror/language";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { languages } from "@codemirror/language-data";
+import { tags as t } from "@lezer/highlight";
 import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
 import { lintKeymap } from "@codemirror/lint";
+
+/*
+ * Memos are Markdown (GFM). Fenced code blocks are highlighted in their own
+ * language, looked up by the fence's info string (```ts, ```python, ...).
+ */
+const markdownSupport = markdown({ base: markdownLanguage, codeLanguages: languages });
+
+/* Token colours for the dark palette; covers Markdown and code alike. */
+const darkHighlight = HighlightStyle.define([
+  // One size for every line: headings differ by colour and weight only, so
+  // line height never varies.
+  { tag: t.heading, color: "#e5c07b", fontWeight: "700" },
+  { tag: t.strong, fontWeight: "700", color: "#e6e9ef" },
+  { tag: t.emphasis, fontStyle: "italic" },
+  { tag: t.strikethrough, textDecoration: "line-through", color: "#7b8494" },
+  { tag: [t.link, t.url], color: "#6ea8fe", textDecoration: "underline" },
+  { tag: t.quote, color: "#98a2b3", fontStyle: "italic" },
+  { tag: t.monospace, color: "#98c379" },
+  { tag: [t.processingInstruction, t.meta, t.contentSeparator], color: "#5c6370" },
+
+  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: "#c678dd" },
+  { tag: [t.definitionKeyword, t.modifier], color: "#c678dd" },
+  { tag: [t.string, t.special(t.string), t.regexp, t.character], color: "#98c379" },
+  { tag: [t.number, t.bool, t.null, t.atom, t.unit], color: "#d19a66" },
+  { tag: [t.comment, t.lineComment, t.blockComment, t.docComment], color: "#5c6370", fontStyle: "italic" },
+  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "#61afef" },
+  { tag: [t.definition(t.variableName), t.definition(t.propertyName)], color: "#e06c75" },
+  { tag: [t.typeName, t.className, t.namespace, t.tagName], color: "#e5c07b" },
+  { tag: [t.propertyName, t.attributeName], color: "#e06c75" },
+  { tag: [t.operator, t.punctuation, t.bracket, t.separator], color: "#abb2bf" },
+  { tag: [t.self, t.special(t.variableName)], color: "#e06c75", fontStyle: "italic" },
+  { tag: t.invalid, color: "#ff5555" },
+]);
 
 /* The palette from index.html; CodeMirror's defaults are light. */
 const darkTheme = EditorView.theme(
@@ -100,7 +136,8 @@ export function makeEditorState(
   const exts: Extension[] = [
     history(),
     indentOnInput(),
-    syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+    markdownSupport,
+    syntaxHighlighting(darkHighlight),
     editKeymap,
     ...indentUnit,
     EditorState.readOnly.of(!!opts.readOnly),

@@ -94,7 +94,7 @@ case "$target" in
   cc -O2 -o ../dist/text-edit host.c \
     -Wl,--whole-archive .scriptc/abi.lib.a -Wl,--no-whole-archive \
     "$RT_NATIVE"/release/runtime/default/scr_async.o \
-    "$WV" -lm $DEPS -Wl,-rpath,'$ORIGIN'
+    "$WV" -lm -lpthread $DEPS -Wl,-rpath,'$ORIGIN'
   printf 'built ../dist/text-edit\n'
   ;;
 esac

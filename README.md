@@ -75,7 +75,7 @@ native/
   vendor/       libwebview-x64.so, libwebview.dll (from webview-bun 2.4.0)
   ui_html.h     generated: the bundled page as a C literal
 ui/
-  editor.ts     CodeMirror state factories
+  editor.ts     CodeMirror state factories; Markdown + fenced-code highlighting
   main.ts       tabs, editor mount, rpc() client
   index.html    page shell
   panic.ts      panic / assert / run / describe

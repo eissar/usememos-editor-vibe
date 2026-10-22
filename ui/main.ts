@@ -1,9 +1,10 @@
 import { EditorView } from "@codemirror/view";
-import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { makeEditorState, type EditRange } from "./editor.ts";
-import { assert, describe, panic, parseReplyObject, run } from "./panic.ts";
+import { assert, describe, installGlobalHandlers, panic, parseReplyObject, run } from "./panic.ts";
 import { MemoBrowser } from "./browser.ts";
 import { MemosClient, describeError } from "./usememos_api.ts";
+
+installGlobalHandlers();
 
 /*
  * The host replies by evaluating window.rpc._reply(id, json) in this document,
@@ -418,7 +419,6 @@ async function activate(id: string) {
     view = new EditorView({
       state,
       parent: editorEl,
-      extensions: [syntaxHighlighting(defaultHighlightStyle, { fallback: true })],
     });
   }
   view.focus();
@@ -561,4 +561,8 @@ async function rescan() {
 window.addEventListener("blur", () => run(flushAll));
 window.addEventListener("focus", () => run(rescan));
 
-run(refresh);
+/* The host's startup watchdog fails loudly unless this arrives. */
+run(async () => {
+  await refresh();
+  await rpc("ready");
+});
