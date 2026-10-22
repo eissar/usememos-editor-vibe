@@ -3,45 +3,63 @@ import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language"
 import { makeEditorState, type EditRange } from "./editor.ts";
 import { assert, panic, parseReplyObject, run } from "./panic.ts";
 
-type RpcFn = (payload: string) => string;
+/* The host binds `rpc` with webview_bind, so calling it returns the reply
+ * directly through webview_return. There is no separate reply channel and no
+ * correlation id: a promise that never settles is the only failure mode if the
+ * two sides disagree, which is exactly how the buttons ended up inert. */
+type RpcFn = (payload: string) => Promise<string> | string;
 declare global {
   interface Window {
-    rpc: RpcFn & { _reply?: (id: number, result: string) => void };
+    rpc: RpcFn;
   }
 }
 
-let seq = 0;
+const RPC_TIMEOUT_MS = 3000;
 
-interface Pending {
-  resolve: (value: unknown) => void;
-  reject: (reason: Error) => void;
-}
-
-const inflight = new Map<number, Pending>();
-
-window.rpc._reply = (id, result) => {
-  const entry = inflight.get(id);
-  if (entry === undefined) return;
-  inflight.delete(id);
-
-  const parsed = parseReplyObject(result);
-  if (!parsed.ok) {
-    entry.reject(new Error("rpc: malformed reply"));
-    return;
-  }
-  entry.resolve(parsed.value);
-};
+/* One call in flight at a time. The host answers a bound call synchronously
+ * through webview_return, so overlapping calls depend on that ordering holding
+ * for every method; serialising removes the question entirely. */
+let rpcQueue: Promise<unknown> = Promise.resolve();
 
 function rpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  const id = ++seq;
+  const call = rpcQueue.then(() => callWithTimeout<T>(method, params));
+  rpcQueue = call.then(
+    () => undefined,
+    () => undefined,
+  );
+  return call;
+}
+
+function callWithTimeout<T>(method: string, params: Record<string, unknown>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    inflight.set(id, { resolve: (value) => resolve(value as T), reject });
-    try {
-      window.rpc(JSON.stringify({ id, method, params }));
-    } catch (error) {
-      inflight.delete(id);
-      reject(error instanceof Error ? error : new Error(String(error)));
-    }
+    // The host's bound function cannot be cancelled, so the timer only rejects
+    // the caller's promise. The queue is freed by rpc() swallowing the
+    // rejection, which keeps a hung call from stranding every later one.
+    let done = false;
+    const finish = (): boolean => {
+      if (done) return false;
+      done = true;
+      clearTimeout(timer);
+      return true;
+    };
+
+    const timer = setTimeout(() => {
+      if (finish()) reject(new Error(`rpc ${method}: no reply within ${RPC_TIMEOUT_MS}ms`));
+    }, RPC_TIMEOUT_MS);
+
+    Promise.resolve(window.rpc(JSON.stringify({ method, params })))
+      .then((reply) => {
+        if (!finish()) return;
+        const parsed = parseReplyObject(reply);
+        assert(parsed.ok, `rpc ${method}: malformed reply`);
+        const body = parsed.value;
+        assert(body["error"] === undefined, `rpc ${method}: ${String(body["error"])}`);
+        resolve(body["value"] as T);
+      })
+      .catch((error: unknown) => {
+        if (!finish()) return;
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
   });
 }
 
