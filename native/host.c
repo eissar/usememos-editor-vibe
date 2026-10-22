@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "ui_html.h"
 
@@ -530,6 +531,25 @@ static const char *dispatch(const char *method, const char *params) {
       first = 0;
     }
     snprintf(reply_buf + w, sizeof reply_buf - w, "]}");
+    return reply_buf;
+  }
+
+  if (strcmp(method, "create") == 0) {
+    char name[128];
+    if (!json_str(params, "name", name, sizeof name)) {
+      snprintf(name, sizeof name, "untitled.txt");
+    }
+
+    /* The host has no cloud identity to draw from, so the id is generated here
+     * and stays stable for as long as the document exists on disk. */
+    char id[128];
+    static unsigned long counter;
+    snprintf(id, sizeof id, "doc-%lu-%lu", (unsigned long)time(NULL), ++counter);
+
+    doc_t *d = doc_open(id);
+    if (d == NULL) return "{\"error\":\"cannot create\"}";
+
+    snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"id\":\"%s\"}}", id);
     return reply_buf;
   }
 
