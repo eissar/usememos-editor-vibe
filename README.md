@@ -89,6 +89,5 @@ Work in progress. Documents persist locally; cloud sync is not wired up.
 and no WebView2 in the Wine prefix, so only the message pipeline and persistence
 are verified end to end.
 
-[REVIEW.md](REVIEW.md) lists every outstanding bug, several of which are unfixed
-memory-safety and data-loss defects. Read it before trusting this with anything
-you care about.
+This has unfixed memory-safety and data-loss defects. It is not safe with
+anything you care about.
