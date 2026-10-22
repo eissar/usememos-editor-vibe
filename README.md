@@ -13,11 +13,18 @@ immediately. When the window regains focus the host rescans `memos/`: new
 files open, deleted ones close, and files changed elsewhere reload. Nothing
 polls.
 
-Every body is always a tab. Closing a tab deletes its file, and the host
-refuses until the document is synced to the cloud. A push is attempted 10 s
-after the last save; the tab shows `^` while waiting and a red `!` once it
-fails. There is no cloud service yet, so every push fails and nothing can be
-closed. A `*` marks unsaved edits and turns red if the save is late. Marks read
+Every `memos/*.md` file is a tab; a tab exists exactly as long as its file.
+Documents are cloud memos opened from Browse, kept as `memos/<memo id>.md`.
+Each one's cloud state (the memo's `updateTime` and a hash of the text the
+cloud holds) lives in `memos/.sync/<id>`, so a document is synced when its
+text hashes to that value.
+
+A push runs 10 s after the last save: the page fetches the memo, refuses if
+its `updateTime` moved since the last pull or push (changed in the cloud), else
+PATCHes the content and records the new `updateTime`. Failed pushes retry when
+the window regains focus. Closing a tab deletes only the local file and is
+refused until the document is synced. The tab shows `^` while waiting and a red
+`!` when a push failed (hover for the reason). A `*` marks unsaved edits and turns red if the save is late. Marks read
 `*` then `^`/`!` in a fixed-width slot.
 Writes go through temp-file-and-rename.
 

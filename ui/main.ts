@@ -141,8 +141,9 @@ async function openMemo(id: string): Promise<string | null> {
   const client = await getMemosClient();
   const memo = await client.getMemo(id);
   if (!memo.ok) return describeError(memo.error);
+  if (memo.value.updateTime === undefined) return "the server did not return an updateTime";
   try {
-    await rpc("import", { id, content: memo.value.content });
+    await rpc("import", { id, content: memo.value.content, updateTime: memo.value.updateTime });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.startsWith("rpc: ")) throw error;
@@ -253,7 +254,8 @@ async function flushEdits(id: string): Promise<void> {
 const SYNC_MS = 10_000;
 
 const syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const syncFailed = new Set<string>();
+/* Why the last push of a document failed. */
+const syncFailed = new Map<string, string>();
 
 function scheduleSync(id: string) {
   const pending = syncTimers.get(id);
@@ -272,22 +274,63 @@ function forgetSync(id: string) {
   syncFailed.delete(id);
 }
 
+interface SyncBegin {
+  synced: boolean;
+  version: string;
+  cloudTime: string;
+  text: string;
+}
+
+function isSyncBegin(v: unknown): v is SyncBegin {
+  const b = v as Partial<SyncBegin> | null;
+  return (
+    typeof b?.synced === "boolean" &&
+    typeof b.version === "string" &&
+    typeof b.cloudTime === "string" &&
+    typeof b.text === "string"
+  );
+}
+
+/*
+ * Pushes one document to its memo. Refuses to overwrite a memo changed in the
+ * cloud since this copy was pulled or last pushed (updateTime differs).
+ */
 async function attemptSync(id: string) {
   syncTimers.delete(id);
   // An edit still held will save, and saving reschedules the push.
   if (isDirty(id)) return;
-  const reply = await rpc<{ synced?: unknown }>("sync", { id });
-  if (reply.synced === true) {
-    await refresh();
-    return;
+  const failure = await pushMemo(id);
+  if (failure === null) syncFailed.delete(id);
+  else syncFailed.set(id, failure);
+  await refresh();
+}
+
+/* Resolves to null on success (or nothing to push), else the reason. */
+async function pushMemo(id: string): Promise<string | null> {
+  const begin = await rpc<unknown>("sync_begin", { id });
+  assert(isSyncBegin(begin), "sync_begin: malformed reply");
+  if (begin.synced) return null;
+  if (begin.cloudTime === "") return "not linked to a cloud memo";
+
+  const client = await getMemosClient();
+  const current = await client.getMemo(id);
+  if (!current.ok) return describeError(current.error);
+  if (current.value.updateTime !== begin.cloudTime) {
+    return "the memo changed in the cloud since it was opened; not overwriting";
   }
-  syncFailed.add(id);
-  renderTabs();
+
+  const pushed = await client.updateContent(id, begin.text);
+  if (!pushed.ok) return describeError(pushed.error);
+  if (pushed.value.updateTime === undefined) return "the server did not return an updateTime";
+
+  await rpc("sync_done", { id, version: begin.version, updateTime: pushed.value.updateTime });
+  return null;
 }
 
 function syncMark(d: DocSummary): { text: string; title: string; failed: boolean } {
   if (d.synced) return { text: "", title: "", failed: false };
-  if (syncFailed.has(d.id)) return { text: "!", title: "Cloud sync failed", failed: true };
+  const failure = syncFailed.get(d.id);
+  if (failure !== undefined) return { text: "!", title: `Cloud sync failed: ${failure}`, failed: true };
   return { text: "^", title: "Waiting to sync to the cloud", failed: false };
 }
 
@@ -495,6 +538,8 @@ async function rescan() {
     forgetSync(id);
   }
   for (const id of reply.changed) scheduleSync(id);
+  // Coming back is also when a failed push (network, server) may now work.
+  for (const id of [...syncFailed.keys()]) scheduleSync(id);
 
   if (activeId !== null && reply.removed.includes(activeId)) {
     activeId = null;

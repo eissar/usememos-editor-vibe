@@ -84,8 +84,12 @@ typedef struct {
    * document when the file on disk no longer matches. */
   long long disk_mtime;
   long long disk_size;
-  /* Set when the cloud holds every change; any edit clears it. Closing
-   * (deleting) requires it. */
+  /* Cloud state from the last pull or push, persisted in .sync/<id>: the
+   * memo's updateTime then, and the hash of the text the cloud then held. */
+  char cloud_time[64];
+  char cloud_hash[17];
+  /* The text's hash equals cloud_hash. Closing (deleting the local file)
+   * requires it. */
   int synced;
 } doc_t;
 
@@ -267,6 +271,8 @@ static char cache_root[1024];
 
 /* Documents directory under the cache root. */
 #define DOCS_DIR "memos"
+/* Per-document cloud state, inside DOCS_DIR. Not *.md, so never a tab. */
+#define SYNC_DIR ".sync"
 
 static void path_join(char *out, size_t cap, const char *a, const char *b) {
   int n = snprintf(out, cap, "%s/%s", a, b);
@@ -347,6 +353,9 @@ static void cache_init(void) {
   char docs_dir[1200];
   path_join(docs_dir, sizeof docs_dir, cache_root, DOCS_DIR);
   if (!mkdir_p(docs_dir)) die("cannot create the documents directory");
+  char sync_dir[1300];
+  path_join(sync_dir, sizeof sync_dir, docs_dir, SYNC_DIR);
+  if (!mkdir_p(sync_dir)) die("cannot create the sync state directory");
 }
 
 static int write_atomic(const char *path, const char *data, size_t len) {
@@ -466,6 +475,57 @@ static int write_atomic_body(const char *id) {
   return 1;
 }
 
+/* --- cloud sync state ---------------------------------------------------- */
+
+/* FNV-1a 64, as 16 hex digits: identifies a text version, not a secret. */
+static void text_hash(const char *text, size_t len, char out[17]) {
+  unsigned long long h = 1469598103934665603ULL;
+  for (size_t i = 0; i < len; i++) {
+    h ^= (unsigned char)text[i];
+    h *= 1099511628211ULL;
+  }
+  snprintf(out, 17, "%016llx", h);
+}
+
+static int sync_path(char *out, size_t cap, const char *id) {
+  if (!id_valid(id)) return 0;
+  char dir[1200], sub[1250];
+  path_join(dir, sizeof dir, cache_root, DOCS_DIR);
+  path_join(sub, sizeof sub, dir, SYNC_DIR);
+  path_join(out, cap, sub, id);
+  return 1;
+}
+
+static void update_synced(doc_t *d) {
+  char now[17];
+  text_hash(d->text, d->len, now);
+  d->synced = d->cloud_hash[0] != '\0' && strcmp(now, d->cloud_hash) == 0;
+}
+
+/* .sync/<id> is two lines: updateTime, then the text hash. */
+static void load_sync(doc_t *d) {
+  d->cloud_time[0] = d->cloud_hash[0] = '\0';
+  char path[1300];
+  if (!sync_path(path, sizeof path, d->id)) return;
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) return;
+  char line1[sizeof d->cloud_time + 2], line2[sizeof d->cloud_hash + 2];
+  if (fgets(line1, sizeof line1, f) != NULL && fgets(line2, sizeof line2, f) != NULL) {
+    line1[strcspn(line1, "\r\n")] = '\0';
+    line2[strcspn(line2, "\r\n")] = '\0';
+    snprintf(d->cloud_time, sizeof d->cloud_time, "%s", line1);
+    snprintf(d->cloud_hash, sizeof d->cloud_hash, "%s", line2);
+  }
+  fclose(f);
+}
+
+static int save_sync(const doc_t *d) {
+  char path[1300], body[128];
+  if (!sync_path(path, sizeof path, d->id)) return 0;
+  int n = snprintf(body, sizeof body, "%s\n%s\n", d->cloud_time, d->cloud_hash);
+  return write_atomic(path, body, (size_t)n);
+}
+
 static doc_t *doc_open(const char *id) {
   doc_t *found = doc_find(id);
   if (found != NULL) return found;
@@ -506,6 +566,8 @@ static doc_t *doc_open(const char *id) {
       memset(&docs[i], 0, sizeof docs[i]);
       return NULL;
     }
+    load_sync(&docs[i]);
+    update_synced(&docs[i]);
     return &docs[i];
   }
   return NULL;
@@ -655,7 +717,7 @@ static void rescan(char *out, size_t cap) {
     d->len = len;
     d->disk_mtime = mtime;
     d->disk_size = size;
-    d->synced = 0;
+    update_synced(d);
     core_clear(i + 1);
     append_id(out, cap, &w, &first, d->id);
   }
@@ -769,20 +831,30 @@ static const char *dispatch(const char *method, const char *params) {
     int on_disk = file_exists(path);
     if (!on_disk) {
       char *content = malloc(MAX_TEXT);
+      char cloud_time[64];
+      if (!json_str(params, "updateTime", cloud_time, sizeof cloud_time) || cloud_time[0] == '\0') {
+        free(content);
+        return "{\"error\":\"missing updateTime\"}";
+      }
       if (content == NULL) die("out of memory");
       if (!json_str(params, "content", content, MAX_TEXT)) {
         free(content);
         return "{\"error\":\"missing content\"}";
       }
       size_t len = normalize_newlines(content, strlen(content));
-      int ok = write_atomic(path, content, len);
+      /* State first: a body without it would look like a local-only file. */
+      doc_t probe;
+      memset(&probe, 0, sizeof probe);
+      snprintf(probe.id, sizeof probe.id, "%s", id);
+      snprintf(probe.cloud_time, sizeof probe.cloud_time, "%s", cloud_time);
+      text_hash(content, len, probe.cloud_hash);
+      int ok = save_sync(&probe) && write_atomic(path, content, len);
       free(content);
       if (!ok) return "{\"error\":\"write failed\"}";
     }
 
     doc_t *d = doc_open(id);
     if (d == NULL) return "{\"error\":\"cannot open\"}";
-    d->synced = !on_disk;
     snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"id\":\"%s\",\"existed\":%s}}", id,
              on_disk ? "true" : "false");
     return reply_buf;
@@ -803,8 +875,8 @@ static const char *dispatch(const char *method, const char *params) {
     return reply_buf;
   }
 
-  /* Closing deletes the document from disk, so it is refused until every
-   * change has reached the cloud. */
+  /* Closing deletes the local file (the cloud memo is untouched), so it is
+   * refused until every change has reached the cloud. */
   if (strcmp(method, "close") == 0) {
     char id[128];
     if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
@@ -815,18 +887,55 @@ static const char *dispatch(const char *method, const char *params) {
     char path[1300];
     if (!body_path(path, sizeof path, d->id)) return "{\"error\":\"bad id\"}";
     if (unlink(path) != 0 && errno != ENOENT) return "{\"error\":\"delete failed\"}";
+    char state[1300];
+    if (sync_path(state, sizeof state, d->id)) unlink(state);
     doc_close(id);
     return "{\"ok\":1,\"value\":{}}";
   }
 
-  /* Pushes the document to the cloud. There is no cloud service yet, so every
-   * push fails and documents stay unsynced. */
-  if (strcmp(method, "sync") == 0) {
+  /*
+   * A push is run by the page in two halves around its Memos calls:
+   * sync_begin hands over the text, its version (hash) and the cloud
+   * updateTime it was based on; sync_done records the push. A version that no
+   * longer matches the text (typing during the push) leaves the document
+   * unsynced, to be pushed again.
+   */
+  if (strcmp(method, "sync_begin") == 0) {
     char id[128];
     if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
     doc_t *d = doc_find(id);
     if (d == NULL) return "{\"error\":\"unknown doc\"}";
-    return "{\"ok\":1,\"value\":{\"synced\":false,\"reason\":\"no cloud service\"}}";
+    char version[17], time_esc[400];
+    size_t te = 0;
+    text_hash(d->text, d->len, version);
+    if (!json_escape_to(time_esc, sizeof time_esc, d->cloud_time, &te)) time_esc[0] = '\0';
+    size_t w = (size_t)snprintf(reply_buf, sizeof reply_buf,
+                                "{\"ok\":1,\"value\":{\"synced\":%s,\"version\":\"%s\",\"cloudTime\":\"%s\",\"text\":\"",
+                                d->synced ? "true" : "false", version, time_esc);
+    size_t esc = 0;
+    if (!json_escape_to(reply_buf + w, sizeof reply_buf - w - 8, d->text, &esc)) {
+      return "{\"error\":\"document too large to send\"}";
+    }
+    w += esc;
+    snprintf(reply_buf + w, sizeof reply_buf - w, "\"}}");
+    return reply_buf;
+  }
+
+  if (strcmp(method, "sync_done") == 0) {
+    char id[128], version[17], cloud_time[64];
+    if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
+    if (!json_str(params, "version", version, sizeof version)) return "{\"error\":\"missing version\"}";
+    if (!json_str(params, "updateTime", cloud_time, sizeof cloud_time) || cloud_time[0] == '\0') {
+      return "{\"error\":\"missing updateTime\"}";
+    }
+    doc_t *d = doc_find(id);
+    if (d == NULL) return "{\"error\":\"unknown doc\"}";
+    snprintf(d->cloud_time, sizeof d->cloud_time, "%s", cloud_time);
+    snprintf(d->cloud_hash, sizeof d->cloud_hash, "%s", version);
+    if (!save_sync(d)) return "{\"error\":\"could not record sync state\"}";
+    update_synced(d);
+    snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"synced\":%s}}", d->synced ? "true" : "false");
+    return reply_buf;
   }
 
   if (strcmp(method, "edit") == 0) {
@@ -955,7 +1064,7 @@ static const char *dispatch(const char *method, const char *params) {
 
     free(previous);
     core_clear(handle);
-    d->synced = 0;
+    update_synced(d);
 
     snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"length\":%zu}}", d->len);
     return reply_buf;
