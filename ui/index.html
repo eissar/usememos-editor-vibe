@@ -37,17 +37,14 @@
       }
       .tab:hover { background: #262a33; }
       .tab.active { background: var(--bg); color: var(--fg); border-color: var(--accent); }
-      .dot { width: 6px; height: 6px; border-radius: 50%; background: transparent; flex: none; }
-      .dot.dirty { background: var(--warn); }
-      .dot.syncing { background: var(--accent); }
-      .dot.conflict { background: var(--bad); }
-      .dot.clean { background: transparent; }
-      .tab .label[contenteditable="true"] { outline: 1px solid var(--accent); padding: 0 3px; cursor: text; color: var(--fg); }
-      .tab .unsaved { color: var(--bad); font-weight: 700; margin-left: -4px; }
-      .tab .unsaved:empty { display: none; }
-      .tab .close { opacity: 0; font-size: 14px; line-height: 1; }
+      .tab .marks { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre; display: inline-flex; }
+      .tab .marks > span { display: inline-block; width: 1ch; text-align: center; }
+      .tab .sync { color: var(--dim); }
+      .tab .sync.failed, .tab .unsaved.late { color: var(--bad); font-weight: 700; }
+      .tab .close { opacity: 0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; width: 1ch; text-align: center; }
       .tab:hover .close { opacity: .6; }
       .tab .close:hover { opacity: 1; color: var(--bad); }
+      .tab .close.blocked, .tab .close.blocked:hover { color: var(--dim); cursor: not-allowed; }
       #editor { flex: 1; min-height: 0; overflow: hidden; }
       .cm-editor { height: 100%; }
       .cm-scroller { font: 13px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
@@ -83,9 +80,9 @@
     <footer>
       <span id="status">idle</span>
       <span class="spacer"></span>
-      <span><span class="k">⌘/Ctrl+S</span> save now</span>
-      <span><span class="k">⌘/Ctrl+W</span> close</span>
-      <span><span class="k">⌘/Ctrl+N</span> new</span>
+      <span><span class="k">Ctrl+S</span> save now</span>
+      <span><span class="k">Ctrl+W</span> close (deletes; needs sync)</span>
+      <span><span class="k">Ctrl+N</span> new</span>
       <span><span class="k">Ctrl+Tab</span> next tab</span>
       <span><span class="k">double-click tab</span> rename</span>
       <button id="new-doc">New</button>

@@ -6,7 +6,17 @@ Cross-platform desktop text editor. C host, delta arithmetic compiled by
 Each document is `bodies/<name>.md` under the cache root; the directory listing
 is the document list and renaming a document renames its file. Edits are held
 in the page and written after 3 s without typing (a red `*` marks the tab
-meanwhile); Ctrl+S, switching tabs, renaming and closing write immediately.
+meanwhile); Ctrl+S, switching tabs, renaming, closing and the window losing focus write
+immediately. When the window regains focus the host rescans `bodies/`: new
+files open, deleted ones close, and files changed elsewhere reload. Nothing
+polls.
+
+Every body is always a tab. Closing a tab deletes its file, and the host
+refuses until the document is synced to the cloud. A push is attempted 10 s
+after the last save; the tab shows `^` while waiting and a red `!` once it
+fails. There is no cloud service yet, so every push fails and nothing can be
+closed. A `*` marks unsaved edits and turns red if the save is late. Marks read
+`*` then `^`/`!` in a fixed-width slot.
 Writes go through temp-file-and-rename.
 
 ## Build

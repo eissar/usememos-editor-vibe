@@ -100,7 +100,7 @@ function isDocId(value: unknown): value is { id: string } {
 interface DocSummary {
   id: string;
   name: string;
-  state: string;
+  synced: boolean;
 }
 
 function element<T extends Element>(selector: string): T {
@@ -140,7 +140,14 @@ interface EditQueue {
   batches: Batch[];
   timer: ReturnType<typeof setTimeout> | null;
   writing: Promise<void> | null;
+  /* Fires once the save is late; only re-renders so the mark can turn red. */
+  lateTimer: ReturnType<typeof setTimeout> | null;
+  /* When the held edits should be on disk. */
+  deadline: number;
 }
+
+/* Grace after the deadline before an unsaved mark counts as late. */
+const LATE_MS = 500;
 
 const editState = new Map<string, EditQueue>();
 
@@ -149,17 +156,27 @@ function isDirty(id: string): boolean {
   return q !== undefined && (q.batches.length > 0 || q.writing !== null);
 }
 
+function isLate(id: string): boolean {
+  const q = editState.get(id);
+  return q !== undefined && isDirty(id) && Date.now() >= q.deadline + LATE_MS;
+}
+
 function queueEdit(id: string, ranges: EditRange[], baseLength: number, length: number) {
   let q = editState.get(id);
   if (q === undefined) {
-    q = { batches: [], timer: null, writing: null };
+    q = { batches: [], timer: null, writing: null, lateTimer: null, deadline: 0 };
     editState.set(id, q);
   }
   const wasDirty = isDirty(id);
   q.batches.push({ ranges, baseLength, length });
   if (q.timer !== null) clearTimeout(q.timer);
   q.timer = setTimeout(() => run(flushEdits, id), IDLE_MS);
-  if (!wasDirty) renderTabs();
+  q.deadline = Date.now() + IDLE_MS;
+  if (q.lateTimer !== null) clearTimeout(q.lateTimer);
+  q.lateTimer = setTimeout(() => {
+    if (isLate(id)) renderTabs();
+  }, IDLE_MS + LATE_MS);
+  if (!wasDirty || isLate(id)) renderTabs();
 }
 
 /* Writes every held edit for `id` now and resolves once the host has them. */
@@ -185,16 +202,76 @@ async function flushEdits(id: string): Promise<void> {
     }
   })();
   await q.writing;
+  scheduleSync(id);
   renderTabs();
+}
+
+/*
+ * Cloud sync. A push is attempted SYNC_MS after a document's last save; until
+ * it succeeds the tab shows ^ (waiting) and then ! (failed). Either state
+ * blocks closing, because closing deletes the local file.
+ */
+const SYNC_MS = 10_000;
+
+const syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const syncFailed = new Set<string>();
+
+function scheduleSync(id: string) {
+  const pending = syncTimers.get(id);
+  if (pending !== undefined) clearTimeout(pending);
+  syncFailed.delete(id);
+  syncTimers.set(
+    id,
+    setTimeout(() => run(attemptSync, id), SYNC_MS),
+  );
+}
+
+function forgetSync(id: string) {
+  const pending = syncTimers.get(id);
+  if (pending !== undefined) clearTimeout(pending);
+  syncTimers.delete(id);
+  syncFailed.delete(id);
+}
+
+async function attemptSync(id: string) {
+  syncTimers.delete(id);
+  // An edit still held will save, and saving reschedules the push.
+  if (isDirty(id)) return;
+  const reply = await rpc<{ synced?: unknown }>("sync", { id });
+  if (reply.synced === true) {
+    await refresh();
+    return;
+  }
+  syncFailed.add(id);
+  renderTabs();
+}
+
+function syncMark(d: DocSummary): { text: string; title: string; failed: boolean } {
+  if (d.synced) return { text: "", title: "", failed: false };
+  if (syncFailed.has(d.id)) return { text: "!", title: "Cloud sync failed", failed: true };
+  return { text: "^", title: "Waiting to sync to the cloud", failed: false };
+}
+
+/* Runs `fn`; an rpc error (the host refusing a request) goes to the status bar
+ * instead of halting. */
+async function reportRefusal(fn: () => Promise<void>) {
+  try {
+    await fn();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.startsWith("rpc: ")) throw error;
+    renderTabs();
+    statusEl.textContent = message.slice(5);
+  }
 }
 
 function statusText(): string {
   const parts = ["idle"];
   if (docs.length) parts[0] = `${docs.length} open`;
-  return parts.join(" · ");
+  return parts.join(" | ");
 }
 
-/* Set while a tab label is being edited, so the periodic refresh does not
+/* Set while a tab label is being edited, so a refresh does not
  * re-render the strip out from under the cursor. */
 let renaming = false;
 
@@ -205,24 +282,17 @@ async function renameDoc(id: string, name: string) {
     return;
   }
   await flushEdits(id);
-  try {
+  await reportRefusal(async () => {
     const reply = await rpc<unknown>("rename", { id, name: trimmed });
     assert(isDocId(reply), "rename: reply has no id");
     editState.delete(id);
+    forgetSync(id);
     if (activeId === id) {
       activeId = null;
       await activate(reply.id);
     }
-  } catch (error) {
-    // A rejected name is the user's input, not a broken program: report it in
-    // the status bar instead of halting.
-    const message = error instanceof Error ? error.message : String(error);
-    if (!message.startsWith("rpc: ")) throw error;
-    renderTabs();
-    statusEl.textContent = message.slice(5);
-    return;
-  }
-  await refresh();
+    await refresh();
+  });
 }
 
 function beginRename(label: HTMLElement, id: string) {
@@ -261,8 +331,6 @@ function renderTabs() {
     ...docs.map((d) => {
       const tab = document.createElement("div");
       tab.className = "tab" + (d.id === activeId ? " active" : "");
-      const dot = document.createElement("span");
-      dot.className = `dot ${d.state}`;
       const label = document.createElement("span");
       label.textContent = d.name || d.id;
       label.className = "label";
@@ -273,15 +341,33 @@ function renderTabs() {
       });
       const close = document.createElement("span");
       close.className = "close";
-      close.textContent = "×";
+      close.textContent = "x";
+      if (!d.synced) {
+        close.classList.add("blocked");
+        close.title = "Not synced to the cloud; cannot close";
+      } else {
+        close.title = "Close and delete the local file";
+      }
       close.addEventListener("click", (ev) => {
         ev.stopPropagation();
         run(closeDoc, d.id);
       });
+      const mark = syncMark(d);
+      // Fixed two-cell slot, always present, so a tab never changes width
+      // when a mark appears or clears.
+      const marks = document.createElement("span");
+      marks.className = "marks";
+      const sync = document.createElement("span");
+      sync.className = "sync" + (mark.failed ? " failed" : "");
+      sync.textContent = mark.text || " ";
+      sync.title = mark.title;
       const unsaved = document.createElement("span");
-      unsaved.className = "unsaved";
-      unsaved.textContent = isDirty(d.id) ? "*" : "";
-      tab.append(dot, label, unsaved, close);
+      const late = isLate(d.id);
+      unsaved.className = "unsaved" + (late ? " late" : "");
+      unsaved.textContent = isDirty(d.id) ? "*" : " ";
+      unsaved.title = !isDirty(d.id) ? "" : late ? "Save is late" : "Unsaved";
+      marks.append(unsaved, sync);
+      tab.append(label, marks, close);
       tab.addEventListener("click", () => run(activate, d.id));
       return tab;
     }),
@@ -317,23 +403,31 @@ async function activate(id: string) {
   renderTabs();
 }
 
+/* Closing deletes the local file. The host refuses while the document has
+ * changes the cloud does not. */
 async function closeDoc(id: string) {
   await flushEdits(id);
-  editState.delete(id);
-  await rpc("close", { id });
-  if (activeId === id) {
-    activeId = null;
-    view?.destroy();
-    view = null;
-    editorEl.append(emptyEl);
-  }
-  await refresh();
+  await reportRefusal(async () => {
+    await rpc("close", { id });
+    editState.delete(id);
+    forgetSync(id);
+    if (activeId === id) {
+      activeId = null;
+      view?.destroy();
+      view = null;
+      editorEl.append(emptyEl);
+    }
+    await refresh();
+  });
 }
 
 async function refresh() {
   const listed = await rpc<unknown>("list");
   assert(Array.isArray(listed), "list: reply is not an array");
   docs = listed as DocSummary[];
+  for (const d of docs) {
+    if (!d.synced && !syncTimers.has(d.id) && !syncFailed.has(d.id)) scheduleSync(d.id);
+  }
   if (!activeId && docs.length) await activate(docs[0]!.id);
   if (docs.length === 0) showEmpty();
   renderTabs();
@@ -365,7 +459,7 @@ function cycleTab(step: number) {
 async function saveActive() {
   if (!activeId) return;
   const id = activeId;
-  statusEl.textContent = "saving…";
+  statusEl.textContent = "saving...";
   await flushEdits(id);
   await rpc("save", { id });
   await refresh();
@@ -414,6 +508,41 @@ window.addEventListener(
   { capture: true },
 );
 
-setInterval(() => run(refresh), 2000);
+/*
+ * No polling: bodies/ is re-read when the window regains focus, which is when
+ * changes made elsewhere first matter. Held edits are written when focus
+ * leaves, so a rescan never meets unsaved text.
+ */
+async function flushAll() {
+  await Promise.all([...editState.keys()].map((id) => flushEdits(id)));
+}
+
+function isIdList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+async function rescan() {
+  await flushAll();
+  const reply = await rpc<{ changed?: unknown; removed?: unknown }>("rescan");
+  assert(isIdList(reply.changed) && isIdList(reply.removed), "rescan: malformed reply");
+  for (const id of reply.removed) {
+    editState.delete(id);
+    forgetSync(id);
+  }
+  for (const id of reply.changed) scheduleSync(id);
+
+  if (activeId !== null && reply.removed.includes(activeId)) {
+    activeId = null;
+    view?.destroy();
+    view = null;
+    editorEl.append(emptyEl);
+  } else if (activeId !== null && reply.changed.includes(activeId)) {
+    await activate(activeId);
+  }
+  await refresh();
+}
+
+window.addEventListener("blur", () => run(flushAll));
+window.addEventListener("focus", () => run(rescan));
 
 run(refresh);

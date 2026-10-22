@@ -83,6 +83,13 @@ typedef struct {
   char id[128];
   char *text;
   size_t len;
+  /* The file as last read or written by this process; a rescan reloads the
+   * document when the file on disk no longer matches. */
+  long long disk_mtime;
+  long long disk_size;
+  /* Set when the cloud holds every change; any edit clears it. Closing
+   * (deleting) requires it. */
+  int synced;
 } doc_t;
 
 typedef struct {
@@ -257,6 +264,15 @@ static int file_exists(const char *path) {
   return stat(path, &st) == 0;
 }
 
+static int body_stat(const char *id, long long *mtime, long long *size) {
+  char path[1300];
+  struct stat st;
+  if (!body_path(path, sizeof path, id) || stat(path, &st) != 0) return 0;
+  *mtime = (long long)st.st_mtime;
+  *size = (long long)st.st_size;
+  return 1;
+}
+
 static int mkdir_p(const char *path) {
   char tmp[1200];
   snprintf(tmp, sizeof tmp, "%s", path);
@@ -388,7 +404,9 @@ static int write_atomic_body(const char *id) {
   if (d == NULL) return 0;
   char path[1300];
   if (!body_path(path, sizeof path, id)) return 0;
-  return write_atomic(path, d->text, d->len);
+  if (!write_atomic(path, d->text, d->len)) return 0;
+  body_stat(d->id, &d->disk_mtime, &d->disk_size);
+  return 1;
 }
 
 static doc_t *doc_open(const char *id) {
@@ -413,6 +431,7 @@ static doc_t *doc_open(const char *id) {
     if (cached != NULL) {
       docs[i].text = cached;
       docs[i].len = len;
+      body_stat(id, &docs[i].disk_mtime, &docs[i].disk_size);
     } else {
       docs[i].text = calloc(1, 1);
       if (docs[i].text == NULL) die("out of memory");
@@ -488,7 +507,7 @@ static char *splice_with(const char *base, size_t base_len, const range_t *rs,
   return buf;
 }
 
-/* --- startup scan -------------------------------------------------------- */
+/* --- directory scan ------------------------------------------------------ */
 /* Temp files from an interrupted write end in .tmp, so the .md suffix check
  * skips them. */
 static int has_suffix(const char *s, const char *suf) {
@@ -515,11 +534,9 @@ static void consider_entry(const char *name, char **ids, int *n) {
   (*n)++;
 }
 
-static void load_bodies(void) {
+static int scan_bodies(char **ids) {
   char dir[1200];
   path_join(dir, sizeof dir, cache_root, "bodies");
-
-  char *ids[MAX_DOCS];
   int n = 0;
 
 #ifdef _WIN32
@@ -544,9 +561,65 @@ static void load_bodies(void) {
 #endif
 
   qsort(ids, (size_t)n, sizeof ids[0], cmp_str);
-  for (int i = 0; i < n; i++) {
-    if (doc_open(ids[i]) == NULL) fprintf(stderr, "text-edit: could not load %s\n", ids[i]);
-    free(ids[i]);
+  return n;
+}
+
+static void append_id(char *out, size_t cap, size_t *w, int *first, const char *id) {
+  *w += (size_t)snprintf(out + *w, cap - *w, "%s\"%s\"", *first ? "" : ",", id);
+  *first = 0;
+}
+
+/*
+ * Brings the document table in line with bodies/: files that appeared are
+ * opened, documents whose file is gone are dropped, and documents whose file
+ * changed on disk are reloaded. Writes the changed and removed ids into `out`
+ * as {"changed":[...],"removed":[...]}.
+ */
+#define RESCAN_CAP ((size_t)MAX_DOCS * (MAX_NAME + 4) * 2 + 64)
+
+static void rescan(char *out, size_t cap) {
+  char *ids[MAX_DOCS];
+  int n = scan_bodies(ids);
+
+  size_t w = (size_t)snprintf(out, cap, "{\"changed\":[");
+  int first = 1;
+  for (int i = 0; i < MAX_DOCS; i++) {
+    doc_t *d = &docs[i];
+    if (!d->in_use) continue;
+    long long mtime = 0, size = 0;
+    if (!body_stat(d->id, &mtime, &size)) continue;
+    if (mtime == d->disk_mtime && size == d->disk_size) continue;
+
+    size_t len = 0;
+    char *text = read_body(d->id, &len);
+    if (text == NULL) continue;
+    free(d->text);
+    d->text = text;
+    d->len = len;
+    d->disk_mtime = mtime;
+    d->disk_size = size;
+    d->synced = 0;
+    core_clear(i + 1);
+    append_id(out, cap, &w, &first, d->id);
+  }
+
+  w += (size_t)snprintf(out + w, cap - w, "],\"removed\":[");
+  first = 1;
+  for (int i = 0; i < MAX_DOCS; i++) {
+    if (!docs[i].in_use) continue;
+    int present = 0;
+    for (int j = 0; j < n && !present; j++) present = strcasecmp(ids[j], docs[i].id) == 0;
+    if (present) continue;
+    append_id(out, cap, &w, &first, docs[i].id);
+    doc_close(docs[i].id);
+  }
+  snprintf(out + w, cap - w, "]}");
+
+  for (int j = 0; j < n; j++) {
+    if (doc_find(ids[j]) == NULL && doc_open(ids[j]) == NULL) {
+      fprintf(stderr, "text-edit: could not load %s\n", ids[j]);
+    }
+    free(ids[j]);
   }
 }
 
@@ -569,8 +642,8 @@ static const char *dispatch(const char *method, const char *params) {
         snprintf(name, sizeof name, "%s", docs[i].id);
       }
       w += snprintf(reply_buf + w, sizeof reply_buf - w,
-                    "%s{\"id\":\"%s\",\"name\":\"%s\",\"state\":\"clean\",\"length\":%zu}",
-                    first ? "" : ",", docs[i].id, name, docs[i].len);
+                    "%s{\"id\":\"%s\",\"name\":\"%s\",\"synced\":%s,\"length\":%zu}",
+                    first ? "" : ",", docs[i].id, name, docs[i].synced ? "true" : "false", docs[i].len);
       first = 0;
     }
     snprintf(reply_buf + w, sizeof reply_buf - w, "]}");
@@ -583,8 +656,7 @@ static const char *dispatch(const char *method, const char *params) {
       snprintf(base, sizeof base, "untitled");
     }
 
-    /* First free name of "base", "base 2", "base 3", ... -- free meaning
-     * neither open nor on disk (closed documents keep their files). */
+    /* First free name of "base", "base 2", "base 3", ... */
     char id[MAX_NAME + 16];
     char path[1300];
     int found = 0;
@@ -635,6 +707,7 @@ static const char *dispatch(const char *method, const char *params) {
         return "{\"error\":\"rename failed\"}";
       }
       snprintf(d->id, sizeof d->id, "%s", to);
+      body_stat(d->id, &d->disk_mtime, &d->disk_size);
     }
 
     snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"id\":\"%s\"}}", d->id);
@@ -656,14 +729,30 @@ static const char *dispatch(const char *method, const char *params) {
     return reply_buf;
   }
 
+  /* Closing deletes the document from disk, so it is refused until every
+   * change has reached the cloud. */
   if (strcmp(method, "close") == 0) {
     char id[128];
     if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
-    if (doc_find(id) != NULL && !write_atomic_body(id)) {
-      return "{\"error\":\"write failed\"}";
-    }
+    doc_t *d = doc_find(id);
+    if (d == NULL) return "{\"error\":\"unknown doc\"}";
+    if (!d->synced) return "{\"error\":\"not synced to the cloud; cannot close\"}";
+
+    char path[1300];
+    if (!body_path(path, sizeof path, d->id)) return "{\"error\":\"bad id\"}";
+    if (unlink(path) != 0 && errno != ENOENT) return "{\"error\":\"delete failed\"}";
     doc_close(id);
     return "{\"ok\":1,\"value\":{}}";
+  }
+
+  /* Pushes the document to the cloud. There is no cloud service yet, so every
+   * push fails and documents stay unsynced. */
+  if (strcmp(method, "sync") == 0) {
+    char id[128];
+    if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
+    doc_t *d = doc_find(id);
+    if (d == NULL) return "{\"error\":\"unknown doc\"}";
+    return "{\"ok\":1,\"value\":{\"synced\":false,\"reason\":\"no cloud service\"}}";
   }
 
   if (strcmp(method, "edit") == 0) {
@@ -792,8 +881,16 @@ static const char *dispatch(const char *method, const char *params) {
 
     free(previous);
     core_clear(handle);
+    d->synced = 0;
 
     snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"length\":%zu}}", d->len);
+    return reply_buf;
+  }
+
+  if (strcmp(method, "rescan") == 0) {
+    char body[RESCAN_CAP];
+    rescan(body, sizeof body);
+    snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":%s}", body);
     return reply_buf;
   }
 
@@ -929,7 +1026,10 @@ static void on_rpc(const char *seq, const char *req, void *arg) {
 int main(void) {
   core_init();
   cache_init();
-  load_bodies();
+  {
+    char ignored[RESCAN_CAP];
+    rescan(ignored, sizeof ignored);
+  }
 
   g_window = webview_create(getenv("TEXT_EDIT_DEBUG") != NULL, NULL);
   if (g_window == NULL) {
