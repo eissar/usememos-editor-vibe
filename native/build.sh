@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build the native host.
 #
-#   ./build.sh              linux binary + libwebview from node_modules
+#   ./build.sh              linux binary
 #   ./build.sh --windows    windows .exe (ScriptC emits COFF under Wine,
 #                           host zig links it; no Windows toolchain needed)
 #
@@ -63,7 +63,7 @@ case "$target" in
   printf 'compiling core\n'
   "$SCRIPTC" build --lib --profile profile.json >/dev/null
 
-  WV=${WEBVIEW_LIB:-../node_modules/webview-bun/build/libwebview-x64.so}
+  WV=${WEBVIEW_LIB:-vendor/libwebview-x64.so}
   [ -f "$WV" ] || { echo "missing $WV (set WEBVIEW_LIB)" >&2; exit 1; }
 
   # The webview library needs WebKitGTK at link time. When it is absent (CI,

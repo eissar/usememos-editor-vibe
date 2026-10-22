@@ -1,7 +1,7 @@
 # text-edit
 
-Cross-platform desktop text editor. C host, TypeScript frontend, delta arithmetic
-compiled by [scriptc](https://scriptc.dev).
+Cross-platform desktop text editor. C host, delta arithmetic compiled by
+[scriptc](https://scriptc.dev).
 
 Local disk is a cache, never the source of truth. Every keystroke writes the body
 through temp-file-and-rename and flushes metadata, so a hard kill loses nothing
@@ -10,19 +10,11 @@ typed. A cached body wins over an empty document on open.
 ## Build
 
 ```sh
-bun install
-bun run ui        # bundle the CodeMirror frontend
-bun run check     # typecheck
-bun run build     # -> dist/text-edit
-bun run build:win # -> dist/text-edit-windows-x64.exe
+./native/build.sh              # -> dist/text-edit
+./native/build.sh --windows    # -> dist/text-edit-windows-x64.exe
 ```
 
-`native/build.sh` does the native work directly:
-
-```sh
-./build.sh              # linux
-./build.sh --windows    # windows x64
-```
+No package manager step: the webview binaries are vendored in `native/vendor/`.
 
 Linux needs WebKitGTK 6.0 at link time. Set `WEBVIEW_DEPS=skip` to link without
 it and exercise the host against a stub.
@@ -39,7 +31,7 @@ TEXT_EDIT_URL=http://127.0.0.1:3000/ ./dist/text-edit
 ```
 
 The host does not serve the UI — it requires `TEXT_EDIT_URL` pointing at
-something that does. Linux needs WebKitGTK; Windows needs WebView2 and
+something that does. No frontend ships in this repo; see Status. Linux needs WebKitGTK; Windows needs WebView2 and
 `libwebview.dll` beside the executable. `TEXT_EDIT_CACHE` selects the cache root,
 defaulting to `~/.cache/text-edit`.
 
@@ -52,12 +44,7 @@ native/
   profile.json  the ABI contract
   libwebview.def  import library for the Windows DLL
   build.sh      linux + windows builds
-src/ui/         CodeMirror frontend
-  editor.ts     state factories
-  main.ts       tabs, editor mount, rpc() client
-  index.html    shell page
-  panic.ts      panic / run / parseJson
-  build-ui.ts   prebuild -> main.bundle.js
+  vendor/       libwebview-x64.so, libwebview.dll (from webview-bun 2.4.0)
 ```
 
 ## Design
@@ -88,6 +75,9 @@ batch).
 ## Status
 
 Work in progress. Documents persist locally; cloud sync is not wired up.
+
+**No frontend.** `src/ui/` was deleted; the host drives whatever `TEXT_EDIT_URL`
+points at. Nothing in this repo serves or builds that page.
 
 **The window has never been opened.** There is no WebKitGTK on the Linux dev box
 and no WebView2 in the Wine prefix, so only the message pipeline and persistence
