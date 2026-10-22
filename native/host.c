@@ -23,6 +23,7 @@
 #ifdef _WIN32
 #include <direct.h>
 #include <process.h>
+#include <windows.h>
 #define make_dir(p) _mkdir(p)
 #define get_pid() _getpid()
 #else
@@ -42,6 +43,7 @@ void webview_terminate(webview_t *w);
 void webview_set_title(webview_t *w, const char *title);
 void webview_set_size(webview_t *w, int width, int height, int hints);
 void webview_set_html(webview_t *w, const char *html);
+void *webview_get_window(webview_t *w);
 void webview_eval(webview_t *w, const char *js);
 void webview_bind(webview_t *w, const char *name, webview_bind_cb fn, void *arg);
 void webview_return(webview_t *w, const char *seq, int status, const char *result);
@@ -85,10 +87,30 @@ typedef struct {
 static doc_t docs[MAX_DOCS];
 static webview_t *g_window;
 
+/*
+ * Every fatal path funnels through here. A GUI-subsystem binary has no console,
+ * so stderr on double-click goes nowhere and the process looks like it simply
+ * failed to start. The message is therefore shown natively before exiting: a
+ * failure the user cannot see is indistinguishable from a hang.
+ */
+#ifdef _WIN32
+static void notify(const char *msg) {
+  char body[2048];
+  snprintf(body, sizeof body,
+           "%s\n\nIf this is the first run, check that the WebView2 runtime is "
+           "installed:\nhttps://developer.microsoft.com/microsoft-edge/webview2/",
+           msg);
+  MessageBoxA(NULL, body, "text-edit - cannot start", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+}
+#else
+static void notify(const char *msg) {
+  (void)msg;
+}
+#endif
+
 static void die(const char *msg) {
-  /* No console on a GUI subsystem binary; the message still reaches Wine and
-   * any attached debugger, and the exit code is the signal. */
   fprintf(stderr, "text-edit: %s\n", msg);
+  notify(msg);
   exit(1);
 }
 
@@ -688,12 +710,26 @@ int main(void) {
   cache_init();
 
   g_window = webview_create(getenv("TEXT_EDIT_DEBUG") != NULL, NULL);
-  if (g_window == NULL) die("webview_create failed");
+  if (g_window == NULL) {
+    die("could not create the window (webview_create returned null)");
+  }
+
+  /* A non-null handle does not prove a window exists: the platform can hand
+   * back a context whose native window failed to appear, which is exactly the
+   * "starts and shows nothing" symptom. Check the handle itself. */
+  if (webview_get_window(g_window) == NULL) {
+    die("the window was created but has no native handle");
+  }
+
+  if (UI_HTML == NULL || UI_HTML[0] == '\0') {
+    die("the embedded UI is empty - ui/build.ts did not run");
+  }
 
   webview_set_title(g_window, "text-edit");
   webview_set_size(g_window, 1100, 720, 0);
   webview_bind(g_window, "rpc", on_rpc, NULL);
   webview_set_html(g_window, UI_HTML);
+
   webview_run(g_window);
 
   for (int i = 0; i < MAX_DOCS; i++) {
