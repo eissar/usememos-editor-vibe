@@ -6,6 +6,7 @@ native/core.so
 native/*.a
 native/*.lib
 native/*.exe
+native/ui_html.h
 
 # dependencies
 node_modules

@@ -27,13 +27,15 @@ runtime pack. `libwebview.def` generates the import library the DLL omits.
 ## Run
 
 ```sh
-TEXT_EDIT_URL=http://127.0.0.1:3000/ ./dist/text-edit
+./dist/text-edit
 ```
 
-The host does not serve the UI — it requires `TEXT_EDIT_URL` pointing at
-something that does. No frontend ships in this repo; see Status. Linux needs WebKitGTK; Windows needs WebView2 and
-`libwebview.dll` beside the executable. `TEXT_EDIT_CACHE` selects the cache root,
-defaulting to `~/.cache/text-edit`.
+No server and no URL: the page is bundled and embedded at build time, then handed
+to the webview with `webview_set_html`.
+
+Linux needs WebKitGTK; Windows needs WebView2 and `libwebview.dll` beside the
+executable. `TEXT_EDIT_CACHE` selects the cache root, defaulting to
+`~/.cache/text-edit`.
 
 ## Layout
 
@@ -45,6 +47,13 @@ native/
   libwebview.def  import library for the Windows DLL
   build.sh      linux + windows builds
   vendor/       libwebview-x64.so, libwebview.dll (from webview-bun 2.4.0)
+  ui_html.h     generated: the bundled page as a C literal
+ui/
+  editor.ts     CodeMirror state factories
+  main.ts       tabs, editor mount, rpc() client
+  index.html    page shell
+  panic.ts      panic / run / parseJson
+  build.ts      bundles ui/ -> native/ui_html.h
 ```
 
 ## Design
@@ -75,9 +84,6 @@ batch).
 ## Status
 
 Work in progress. Documents persist locally; cloud sync is not wired up.
-
-**No frontend.** `src/ui/` was deleted; the host drives whatever `TEXT_EDIT_URL`
-points at. Nothing in this repo serves or builds that page.
 
 **The window has never been opened.** There is no WebKitGTK on the Linux dev box
 and no WebView2 in the Wine prefix, so only the message pipeline and persistence

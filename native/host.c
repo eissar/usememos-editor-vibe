@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+
+#include "ui_html.h"
+
 #ifdef _WIN32
 #include <direct.h>
 #include <process.h>
@@ -38,7 +41,7 @@ void webview_run(webview_t *w);
 void webview_terminate(webview_t *w);
 void webview_set_title(webview_t *w, const char *title);
 void webview_set_size(webview_t *w, int width, int height, int hints);
-void webview_navigate(webview_t *w, const char *url);
+void webview_set_html(webview_t *w, const char *html);
 void webview_eval(webview_t *w, const char *js);
 void webview_bind(webview_t *w, const char *name, webview_bind_cb fn, void *arg);
 void webview_return(webview_t *w, const char *seq, int status, const char *result);
@@ -517,9 +520,6 @@ static void on_rpc(const char *seq, const char *req, void *arg) {
 }
 
 int main(void) {
-  const char *url = getenv("TEXT_EDIT_URL");
-  if (url == NULL) die("TEXT_EDIT_URL not set");
-
   core_init();
   cache_init();
 
@@ -529,7 +529,7 @@ int main(void) {
   webview_set_title(g_window, "text-edit");
   webview_set_size(g_window, 1100, 720, 0);
   webview_bind(g_window, "rpc", on_rpc, NULL);
-  webview_navigate(g_window, url);
+  webview_set_html(g_window, UI_HTML);
   webview_run(g_window);
 
   for (int i = 0; i < MAX_DOCS; i++) {

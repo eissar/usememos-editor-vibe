@@ -254,8 +254,7 @@ the intended WebKit stubs. A build can look fine and crash on first use.
 ## Low
 
 `snprintf` truncation unchecked at host.c:95, 150, 316, 494; `unlink` failures
-ignored at 218; `fclose` unchecked at 281; empty `TEXT_EDIT_URL` not rejected at
-520; `ABI_MASK` defined but never used (host.c:58) so masked codes are never
+ignored at 218; `fclose` unchecked at 281; `ABI_MASK` defined but never used (host.c:58) so masked codes are never
 normalised as the header claims; `chmod` failure swallowed (build.sh:37); build
 inputs default into `/tmp` with no authenticity check (build.sh:24–30); artifact
 existence never verified (build.sh:88).
@@ -401,8 +400,10 @@ unhandled rejection and keeps running.
 - **No cloud sync.** Debounce, conflict detection and eviction were in the deleted
   Bun host. Documents persist but never upload.
 - **No `save`, `close` or `reveal` methods** in the C host.
-- **The C host serves no UI.** It requires `TEXT_EDIT_URL` pointing at a server it
-  does not provide; something else must serve `src/ui/`.
+- **The page is embedded at build time.** `ui/build.ts` bundles the frontend into
+  `native/ui_html.h` and the host passes it to `webview_set_html`. Changing the
+  frontend requires rebuilding the binary, and the generated header must not be
+  committed.
 - **No tests.** The 45 Bun-host tests were deleted with it. The native side has
   none.
 - **No CI.**

@@ -19,6 +19,12 @@ RT_WIN=${SCRIPTC_RT_WIN:-/tmp/scw/package/dist/lib/runtime-win32-x64-msvc/artifa
 
 target=${1:-}
 
+# The page is embedded, so it must be regenerated whenever the frontend changes.
+# Removing the header first means a failed UI build cannot silently reuse a
+# stale page.
+rm -f ui_html.h
+bun run ../ui/build.ts
+
 mkdir -p ../dist
 
 case "$target" in
