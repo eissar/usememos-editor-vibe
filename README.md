@@ -67,6 +67,7 @@ ui/
   main.ts       tabs, editor mount, rpc() client
   index.html    page shell
   panic.ts      panic / assert / run / describe
+  usememos_api.ts  Memos REST client (not wired to sync yet)
   build.ts      bundles ui/ -> native/ui_html.h
 ```
 
