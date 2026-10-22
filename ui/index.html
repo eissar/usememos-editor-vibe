@@ -33,14 +33,18 @@
         display: flex; align-items: center; gap: 6px;
         padding: 3px 8px; border-radius: 5px; cursor: pointer;
         white-space: nowrap; color: var(--dim);
+        border: 1px solid var(--border);
       }
       .tab:hover { background: #262a33; }
-      .tab.active { background: var(--bg); color: var(--fg); }
+      .tab.active { background: var(--bg); color: var(--fg); border-color: var(--accent); }
       .dot { width: 6px; height: 6px; border-radius: 50%; background: transparent; flex: none; }
       .dot.dirty { background: var(--warn); }
       .dot.syncing { background: var(--accent); }
       .dot.conflict { background: var(--bad); }
       .dot.clean { background: transparent; }
+      .tab .label[contenteditable="true"] { outline: 1px solid var(--accent); padding: 0 3px; cursor: text; color: var(--fg); }
+      .tab .unsaved { color: var(--bad); font-weight: 700; margin-left: -4px; }
+      .tab .unsaved:empty { display: none; }
       .tab .close { opacity: 0; font-size: 14px; line-height: 1; }
       .tab:hover .close { opacity: .6; }
       .tab .close:hover { opacity: 1; color: var(--bad); }
@@ -81,6 +85,9 @@
       <span class="spacer"></span>
       <span><span class="k">⌘/Ctrl+S</span> save now</span>
       <span><span class="k">⌘/Ctrl+W</span> close</span>
+      <span><span class="k">⌘/Ctrl+N</span> new</span>
+      <span><span class="k">Ctrl+Tab</span> next tab</span>
+      <span><span class="k">double-click tab</span> rename</span>
       <button id="new-doc">New</button>
       <button id="reveal">Cache folder</button>
     </footer>

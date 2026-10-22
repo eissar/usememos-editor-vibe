@@ -1,6 +1,7 @@
 import { EditorState, type Extension } from "@codemirror/state";
 import {
   drawSelection,
+  EditorView,
   dropCursor,
   highlightActiveLine,
   highlightActiveLineGutter,
@@ -14,8 +15,27 @@ import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/sea
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
 import { lintKeymap } from "@codemirror/lint";
 
+/* The palette from index.html; CodeMirror's defaults are light. */
+const darkTheme = EditorView.theme(
+  {
+    "&": { backgroundColor: "#16181d", color: "#d6dae3" },
+    ".cm-content": { caretColor: "#6ea8fe" },
+    ".cm-cursor, .cm-dropCursor": { borderLeftColor: "#6ea8fe" },
+    ".cm-gutters": { backgroundColor: "#16181d", color: "#4b5260", border: "none", borderRight: "1px solid #2a2e38" },
+    ".cm-activeLineGutter": { backgroundColor: "#1d2027", color: "#7b8494" },
+    ".cm-activeLine": { backgroundColor: "#1d202780" },
+    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": { backgroundColor: "#2b3a55" },
+    ".cm-selectionMatch": { backgroundColor: "#2b3a5580" },
+    ".cm-foldPlaceholder": { backgroundColor: "#262a33", border: "none", color: "#7b8494" },
+    ".cm-panels": { backgroundColor: "#1d2027", color: "#d6dae3" },
+    ".cm-tooltip": { backgroundColor: "#1d2027", border: "1px solid #2a2e38" },
+  },
+  { dark: true },
+);
+
 export function viewExtensions(): Extension[] {
   return [
+    darkTheme,
     lineNumbers(),
     highlightActiveLineGutter(),
     highlightActiveLine(),

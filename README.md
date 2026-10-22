@@ -3,9 +3,11 @@
 Cross-platform desktop text editor. C host, delta arithmetic compiled by
 [scriptc](https://scriptc.dev).
 
-Local disk is a cache, never the source of truth. Every keystroke writes the body
-through temp-file-and-rename and flushes metadata, so a hard kill loses nothing
-typed. A cached body wins over an empty document on open.
+Each document is `bodies/<name>.md` under the cache root; the directory listing
+is the document list and renaming a document renames its file. Edits are held
+in the page and written after 3 s without typing (a red `*` marks the tab
+meanwhile); Ctrl+S, switching tabs, renaming and closing write immediately.
+Writes go through temp-file-and-rename.
 
 ## Build
 
@@ -14,7 +16,7 @@ typed. A cached body wins over an empty document on open.
 ./native/build.sh --windows    # -> dist/text-edit-windows-x64.exe
 ```
 
-No package manager step: the webview binaries are vendored in `native/vendor/`.
+The webview binaries are vendored in `native/vendor/`. The page is bundled with bun.
 
 Linux needs WebKitGTK 6.0 at link time. Set `WEBVIEW_DEPS=skip` to link without
 it and exercise the host against a stub.
@@ -52,7 +54,7 @@ ui/
   editor.ts     CodeMirror state factories
   main.ts       tabs, editor mount, rpc() client
   index.html    page shell
-  panic.ts      panic / run / parseJson
+  panic.ts      panic / assert / run / describe
   build.ts      bundles ui/ -> native/ui_html.h
 ```
 
@@ -83,11 +85,5 @@ batch).
 
 ## Status
 
-Work in progress. Documents persist locally; cloud sync is not wired up.
-
-**The window has never been opened.** There is no WebKitGTK on the Linux dev box
-and no WebView2 in the Wine prefix, so only the message pipeline and persistence
-are verified end to end.
-
-This has unfixed memory-safety and data-loss defects. It is not safe with
-anything you care about.
+Prototype. Runs on Windows. There is no WebKitGTK on the Linux dev box, so the
+Linux host is only exercised against a stub webview.

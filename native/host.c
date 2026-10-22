@@ -25,9 +25,14 @@
 #include <direct.h>
 #include <process.h>
 #include <windows.h>
+#include <shellapi.h>
 #define make_dir(p) _mkdir(p)
 #define get_pid() _getpid()
+#define strncasecmp _strnicmp
+#define strcasecmp _stricmp
 #else
+#include <dirent.h>
+#include <strings.h>
 #include <unistd.h>
 #define make_dir(p) mkdir((p), 0700)
 #define get_pid() getpid()
@@ -90,8 +95,6 @@ static doc_t docs[MAX_DOCS];
 static webview_t *g_window;
 
 /*
- * The single fatal path: report, then halt. There is no recovery.
- *
  * A GUI-subsystem binary has no console, so stderr on double-click goes
  * nowhere and the process looks like it simply failed to start. Rendering into
  * the page is not an option either: webview_eval is asynchronous and exit()
@@ -192,11 +195,11 @@ static int json_str(const char *json, const char *key, char *buf, size_t cap) {
 
 /* --- persistence --------------------------------------------------------- */
 /*
- * Mirrors the Bun host: bodies live under <root>/bodies/<id> and metadata in
- * <root>/index.json. Every write goes through a temp file and rename, so an
+ * Each document is <root>/bodies/<id>.md, and the directory listing is the list
+ * of documents. Every write goes through a temp file and rename, so an
  * interrupted write leaves either the old content or the new one, never a
- * truncated file. Metadata is flushed on every edit; that is what makes a crash
- * lose nothing typed.
+ * truncated file. Bodies are written on every edit, so a crash loses nothing
+ * typed.
  */
 
 static char cache_root[1024];
@@ -207,35 +210,51 @@ static void path_join(char *out, size_t cap, const char *a, const char *b) {
 }
 
 /*
- * Percent-encodes anything outside [A-Za-z0-9._-] so an id cannot escape the
- * body directory or collide with the index.
+ * A document's id is its name, and its body is <root>/bodies/<name>.md.
  *
- * Ids come from the page, so a bad one is an expected failure and returns 0
- * rather than aborting: "." and ".." are inside the allowed set and would
- * otherwise resolve to the parent directory.
+ * Names must be valid filenames on every platform, so the Windows rules apply
+ * everywhere: printable ASCII only, none of <>:"/\|?*, no leading or trailing
+ * space or dot, and none of the reserved device names (CON, NUL, COM1, ...).
+ * Non-ASCII is refused because the host uses the ANSI file APIs on Windows,
+ * which would mangle UTF-8.
  */
-static int body_path(char *out, size_t cap, const char *id) {
-  if (strcmp(id, ".") == 0 || strcmp(id, "..") == 0) return 0;
+#define MAX_NAME 100
 
-  char safe[512];
-  size_t w = 0;
-  for (const char *p = id; *p != '\0'; p++) {
-    unsigned char c = (unsigned char)*p;
-    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-        c == '.' || c == '_' || c == '-') {
-      if (w + 2 > sizeof safe) return 0;
-      safe[w++] = (char)c;
-    } else {
-      if (w + 4 > sizeof safe) return 0;
-      w += (size_t)snprintf(safe + w, sizeof safe - w, "%%%02X", c);
-    }
+static int name_valid(const char *name) {
+  size_t n = strlen(name);
+  if (n == 0 || n > MAX_NAME) return 0;
+  if (name[0] == ' ' || name[0] == '.' || name[n - 1] == ' ' || name[n - 1] == '.') return 0;
+  for (const unsigned char *p = (const unsigned char *)name; *p != 0; p++) {
+    if (*p < 0x20 || *p > 0x7e) return 0;
+    if (strchr("<>:\"/\\|?*", *p) != NULL) return 0;
   }
-  safe[w] = '\0';
 
+  /* Reserved device names, with or without an extension ("nul.txt" too). */
+  static const char *reserved[] = {"CON", "PRN", "AUX", "NUL"};
+  size_t stem = strcspn(name, ".");
+  for (size_t i = 0; i < sizeof reserved / sizeof reserved[0]; i++) {
+    if (stem == 3 && strncasecmp(name, reserved[i], 3) == 0) return 0;
+  }
+  if (stem == 4 && (strncasecmp(name, "COM", 3) == 0 || strncasecmp(name, "LPT", 3) == 0) &&
+      name[3] >= '1' && name[3] <= '9') {
+    return 0;
+  }
+  return 1;
+}
+
+static int body_path(char *out, size_t cap, const char *id) {
+  if (!name_valid(id)) return 0;
+  char file[MAX_NAME + 8];
+  snprintf(file, sizeof file, "%s.md", id);
   char dir[1200];
   path_join(dir, sizeof dir, cache_root, "bodies");
-  path_join(out, cap, dir, safe);
+  path_join(out, cap, dir, file);
   return 1;
+}
+
+static int file_exists(const char *path) {
+  struct stat st;
+  return stat(path, &st) == 0;
 }
 
 static int mkdir_p(const char *path) {
@@ -271,7 +290,6 @@ static void cache_init(void) {
   if (!mkdir_p(bodies)) die("cannot create bodies directory");
 }
 
-/* Writes `len` bytes to path via a temp file and rename. */
 static int write_atomic(const char *path, const char *data, size_t len) {
   char tmp[1300];
   snprintf(tmp, sizeof tmp, "%s.%ld.tmp", path, (long)get_pid());
@@ -285,26 +303,18 @@ static int write_atomic(const char *path, const char *data, size_t len) {
     unlink(tmp);
     return 0;
   }
+#ifdef _WIN32
+  /* The CRT's rename() will not replace an existing file on Windows. */
+  if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+#else
   if (rename(tmp, path) != 0) {
+#endif
     unlink(tmp);
     return 0;
   }
   return 1;
 }
 
-static void index_path(char *out, size_t cap) {
-  path_join(out, cap, cache_root, "index.json");
-}
-
-/*
- * index.json is the one file whose corruption loses every document, so it is
- * rewritten atomically in full. Small enough that rewriting beats incremental
- * updates.
- */
-/* Writes `in` as a JSON string body into `out`, escaping quotes, backslashes and
- * control bytes. Ids are arbitrary page input, so emitting them raw would
- * produce an unparseable index -- the one file whose corruption loses every
- * document. Returns 0 when the destination is too small. */
 static int json_escape_to(char *out, size_t cap, const char *in, size_t *written) {
   size_t w = 0;
   for (const unsigned char *p = (const unsigned char *)in; *p != 0; p++) {
@@ -323,40 +333,6 @@ static int json_escape_to(char *out, size_t cap, const char *in, size_t *written
   out[w] = '\0';
   *written = w;
   return 1;
-}
-
-static void save_index(void) {
-  char path[1300];
-  index_path(path, sizeof path);
-
-  size_t cap = 4096 + (size_t)MAX_DOCS * 1024;
-  char *buf = malloc(cap);
-  if (buf == NULL) die("out of memory");
-
-  int w = snprintf(buf, cap, "{\"version\":1,\"docs\":{");
-  if (w < 0) die("index format error");
-
-  int first = 1;
-  for (int i = 0; i < MAX_DOCS; i++) {
-    if (!docs[i].in_use) continue;
-
-    char key[1200];
-    size_t key_len = 0;
-    if (!json_escape_to(key, sizeof key, docs[i].id, &key_len)) die("document id too long");
-
-    int m = snprintf(buf + w, cap - (size_t)w, "%s\"%s\":{\"id\":\"%s\",\"length\":%zu}",
-                     first ? "" : ",", key, key, docs[i].len);
-    if (m < 0 || (size_t)m >= cap - (size_t)w) die("index too large");
-    w += m;
-    first = 0;
-  }
-
-  int m = snprintf(buf + w, cap - (size_t)w, "}}");
-  if (m < 0 || (size_t)m >= cap - (size_t)w) die("index too large");
-  w += m;
-
-  if (!write_atomic(path, buf, (size_t)w)) die("cannot write index.json");
-  free(buf);
 }
 
 static char *read_body(const char *id, size_t *len_out) {
@@ -390,9 +366,11 @@ static char *read_body(const char *id, size_t *len_out) {
 
 /* --- document table ------------------------------------------------------ */
 
+/* Case-insensitive, as Windows file names are: "Notes" and "notes" are the
+ * same document. */
 static doc_t *doc_find(const char *id) {
   for (int i = 0; i < MAX_DOCS; i++) {
-    if (docs[i].in_use && strcmp(docs[i].id, id) == 0) return &docs[i];
+    if (docs[i].in_use && strcasecmp(docs[i].id, id) == 0) return &docs[i];
   }
   return NULL;
 }
@@ -400,7 +378,7 @@ static doc_t *doc_find(const char *id) {
 static int64_t doc_handle(const char *id) {
   /* Handle is the slot index + 1, so 0 is always invalid. */
   for (int i = 0; i < MAX_DOCS; i++) {
-    if (docs[i].in_use && strcmp(docs[i].id, id) == 0) return i + 1;
+    if (docs[i].in_use && strcasecmp(docs[i].id, id) == 0) return i + 1;
   }
   return -1;
 }
@@ -430,8 +408,6 @@ static doc_t *doc_open(const char *id) {
     }
     docs[i].in_use = 1;
 
-    /* A cached body wins over an empty document: the host is a cache of cloud
-     * state, and the body is what the user last saw. */
     size_t len = 0;
     char *cached = read_body(id, &len);
     if (cached != NULL) {
@@ -454,7 +430,6 @@ static doc_t *doc_open(const char *id) {
       memset(&docs[i], 0, sizeof docs[i]);
       return NULL;
     }
-    save_index();
     return &docs[i];
   }
   return NULL;
@@ -473,9 +448,6 @@ static void doc_close(const char *id) {
 /* Applies ranges whose inserts are already resolved into `insert_text`. */
 static char *splice_with(const char *base, size_t base_len, const range_t *rs,
                          const char *const *inserts, int n, size_t *out_len) {
-  /* Capacity must cover the base plus every insert, not a fixed slack: a batch
-   * may carry MAX_RANGES inserts of up to MAX_TEXT each, so a constant
-   * base_len + MAX_TEXT allowance overflows the heap. */
   size_t total_insert = 0;
   for (int i = 0; i < n; i++) {
     size_t ins_len = inserts[i] == NULL ? 0 : strlen(inserts[i]);
@@ -516,9 +488,73 @@ static char *splice_with(const char *base, size_t base_len, const range_t *rs,
   return buf;
 }
 
+/* --- startup scan -------------------------------------------------------- */
+/* Temp files from an interrupted write end in .tmp, so the .md suffix check
+ * skips them. */
+static int has_suffix(const char *s, const char *suf) {
+  size_t a = strlen(s), b = strlen(suf);
+  return a >= b && strcmp(s + a - b, suf) == 0;
+}
+
+static int cmp_str(const void *a, const void *b) {
+  return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void consider_entry(const char *name, char **ids, int *n) {
+  if (*n >= MAX_DOCS || !has_suffix(name, ".md")) return;
+  char id[MAX_NAME + 1];
+  size_t len = strlen(name) - 3;
+  if (len == 0 || len >= sizeof id) return;
+  memcpy(id, name, len);
+  id[len] = '\0';
+  if (!name_valid(id)) return;
+
+  ids[*n] = malloc(len + 1);
+  if (ids[*n] == NULL) die("out of memory");
+  memcpy(ids[*n], id, len + 1);
+  (*n)++;
+}
+
+static void load_bodies(void) {
+  char dir[1200];
+  path_join(dir, sizeof dir, cache_root, "bodies");
+
+  char *ids[MAX_DOCS];
+  int n = 0;
+
+#ifdef _WIN32
+  char pattern[1300];
+  path_join(pattern, sizeof pattern, dir, "*");
+  WIN32_FIND_DATAA fd;
+  HANDLE h = FindFirstFileA(pattern, &fd);
+  if (h != INVALID_HANDLE_VALUE) {
+    do {
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+      consider_entry(fd.cFileName, ids, &n);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+  }
+#else
+  DIR *d = opendir(dir);
+  if (d != NULL) {
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) consider_entry(e->d_name, ids, &n);
+    closedir(d);
+  }
+#endif
+
+  qsort(ids, (size_t)n, sizeof ids[0], cmp_str);
+  for (int i = 0; i < n; i++) {
+    if (doc_open(ids[i]) == NULL) fprintf(stderr, "text-edit: could not load %s\n", ids[i]);
+    free(ids[i]);
+  }
+}
+
 /* --- dispatch ------------------------------------------------------------ */
 
-static char reply_buf[1 << 16];
+/* Large enough for an `open` reply: a MAX_TEXT body escaped at worst 6x. */
+#define REPLY_CAP ((size_t)MAX_TEXT * 6 + 4096)
+static char reply_buf[REPLY_CAP];
 
 static const char *dispatch(const char *method, const char *params) {
   if (strcmp(method, "list") == 0) {
@@ -527,8 +563,14 @@ static const char *dispatch(const char *method, const char *params) {
     int first = 1;
     for (int i = 0; i < MAX_DOCS; i++) {
       if (!docs[i].in_use) continue;
+      char name[800];
+      size_t nl = 0;
+      if (!json_escape_to(name, sizeof name, docs[i].id, &nl)) {
+        snprintf(name, sizeof name, "%s", docs[i].id);
+      }
       w += snprintf(reply_buf + w, sizeof reply_buf - w,
-                    "%s{\"id\":\"%s\",\"length\":%zu}", first ? "" : ",", docs[i].id, docs[i].len);
+                    "%s{\"id\":\"%s\",\"name\":\"%s\",\"state\":\"clean\",\"length\":%zu}",
+                    first ? "" : ",", docs[i].id, name, docs[i].len);
       first = 0;
     }
     snprintf(reply_buf + w, sizeof reply_buf - w, "]}");
@@ -536,16 +578,23 @@ static const char *dispatch(const char *method, const char *params) {
   }
 
   if (strcmp(method, "create") == 0) {
-    char name[128];
-    if (!json_str(params, "name", name, sizeof name)) {
-      snprintf(name, sizeof name, "untitled.txt");
+    char base[MAX_NAME + 1];
+    if (!json_str(params, "name", base, sizeof base) || !name_valid(base)) {
+      snprintf(base, sizeof base, "untitled");
     }
 
-    /* The host has no cloud identity to draw from, so the id is generated here
-     * and stays stable for as long as the document exists on disk. */
-    char id[128];
-    static unsigned long counter;
-    snprintf(id, sizeof id, "doc-%lu-%lu", (unsigned long)time(NULL), ++counter);
+    /* First free name of "base", "base 2", "base 3", ... -- free meaning
+     * neither open nor on disk (closed documents keep their files). */
+    char id[MAX_NAME + 16];
+    char path[1300];
+    int found = 0;
+    for (int k = 1; k < 10000 && !found; k++) {
+      if (k == 1) snprintf(id, sizeof id, "%s", base);
+      else snprintf(id, sizeof id, "%s %d", base, k);
+      if (!body_path(path, sizeof path, id)) continue;
+      found = doc_find(id) == NULL && !file_exists(path);
+    }
+    if (!found) return "{\"error\":\"no free name\"}";
 
     doc_t *d = doc_open(id);
     if (d == NULL) return "{\"error\":\"cannot create\"}";
@@ -554,12 +603,56 @@ static const char *dispatch(const char *method, const char *params) {
     return reply_buf;
   }
 
+  if (strcmp(method, "rename") == 0) {
+    char id[MAX_NAME + 16], to[256];
+    if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
+    if (!json_str(params, "name", to, sizeof to)) return "{\"error\":\"missing name\"}";
+    doc_t *d = doc_find(id);
+    if (d == NULL) return "{\"error\":\"unknown doc\"}";
+    if (!name_valid(to)) {
+      return "{\"error\":\"invalid name: use letters, digits and spaces; not <>:\\\"/\\\\|?* or a trailing dot\"}";
+    }
+
+    char from_path[1300], to_path[1300];
+    if (!body_path(from_path, sizeof from_path, d->id)) return "{\"error\":\"bad id\"}";
+    if (!body_path(to_path, sizeof to_path, to)) return "{\"error\":\"invalid name\"}";
+
+    /* A case-only change ("notes" -> "Notes") is the same file on Windows and
+     * must not be treated as a collision with itself. */
+    int same_doc = strcasecmp(d->id, to) == 0;
+    if (!same_doc && (doc_find(to) != NULL || file_exists(to_path))) {
+      return "{\"error\":\"a document with that name already exists\"}";
+    }
+
+    if (strcmp(d->id, to) != 0) {
+      /* Flush first so the renamed file carries the latest text. */
+      if (!write_atomic_body(d->id)) return "{\"error\":\"write failed\"}";
+#ifdef _WIN32
+      if (!MoveFileExA(from_path, to_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+#else
+      if (rename(from_path, to_path) != 0) {
+#endif
+        return "{\"error\":\"rename failed\"}";
+      }
+      snprintf(d->id, sizeof d->id, "%s", to);
+    }
+
+    snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"id\":\"%s\"}}", d->id);
+    return reply_buf;
+  }
+
   if (strcmp(method, "open") == 0) {
     char id[128];
     if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
     doc_t *d = doc_open(id);
     if (d == NULL) return "{\"error\":\"cannot open\"}";
-    snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"length\":%zu}}", d->len);
+    size_t w = (size_t)snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"length\":%zu,\"text\":\"", d->len);
+    size_t esc = 0;
+    if (!json_escape_to(reply_buf + w, sizeof reply_buf - w - 8, d->text, &esc)) {
+      return "{\"error\":\"document too large to send\"}";
+    }
+    w += esc;
+    snprintf(reply_buf + w, sizeof reply_buf - w, "\"}}");
     return reply_buf;
   }
 
@@ -569,7 +662,6 @@ static const char *dispatch(const char *method, const char *params) {
     if (doc_find(id) != NULL && !write_atomic_body(id)) {
       return "{\"error\":\"write failed\"}";
     }
-    save_index();
     doc_close(id);
     return "{\"ok\":1,\"value\":{}}";
   }
@@ -700,9 +792,34 @@ static const char *dispatch(const char *method, const char *params) {
 
     free(previous);
     core_clear(handle);
-    save_index();
 
     snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{\"length\":%zu}}", d->len);
+    return reply_buf;
+  }
+
+  if (strcmp(method, "save") == 0) {
+    char id[128];
+    if (!json_str(params, "id", id, sizeof id)) return "{\"error\":\"missing id\"}";
+    if (doc_find(id) == NULL) return "{\"error\":\"unknown doc\"}";
+    if (!write_atomic_body(id)) return "{\"error\":\"write failed\"}";
+    return "{\"ok\":1,\"value\":{}}";
+  }
+
+  if (strcmp(method, "reveal") == 0) {
+#ifdef _WIN32
+    if ((INT_PTR)ShellExecuteA(NULL, "open", cache_root, NULL, NULL, SW_SHOWNORMAL) <= 32) {
+      return "{\"error\":\"could not open the cache folder\"}";
+    }
+#else
+    char cmd[1200];
+#ifdef __APPLE__
+    snprintf(cmd, sizeof cmd, "open '%s' &", cache_root);
+#else
+    snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", cache_root);
+#endif
+    if (system(cmd) != 0) return "{\"error\":\"could not open the cache folder\"}";
+#endif
+    snprintf(reply_buf, sizeof reply_buf, "{\"ok\":1,\"value\":{}}");
     return reply_buf;
   }
 
@@ -759,17 +876,14 @@ static void eval_on_main(webview_t *w, void *arg) {
   free(job);
 }
 
-/*
- * Delivers a reply to the page.
- *
- * webview_bind callbacks run on the webview's own callback thread, where
- * webview_eval does not execute (the UI thread owns the document), so the eval
- * is posted through webview_dispatch instead. Evaluating directly there was the
- * reason every reply was lost and every call timed out.
- */
+/* Replies by evaluating window.rpc._reply(id, json) in the page, posted
+ * through webview_dispatch so the eval runs on the UI thread. */
 static void reply_to_page(int64_t id, const char *json) {
-  char escaped[(1 << 16) + 64];
-  js_escape_single(escaped, sizeof escaped, json);
+  /* An `open` reply can be megabytes, and escaping can double it. */
+  size_t ecap = strlen(json) * 2 + 64;
+  char *escaped = malloc(ecap);
+  if (escaped == NULL) die("out of memory");
+  js_escape_single(escaped, ecap, json);
 
   size_t need = strlen(escaped) + 64;
   eval_job *job = malloc(sizeof *job);
@@ -778,6 +892,7 @@ static void reply_to_page(int64_t id, const char *json) {
   if (job->script == NULL) die("out of memory");
 
   snprintf(job->script, need, "window.rpc._reply(%lld,'%s')", (long long)id, escaped);
+  free(escaped);
 
   if (webview_dispatch(g_window, eval_on_main, job) != 0) {
     free(job->script);
@@ -787,11 +902,17 @@ static void reply_to_page(int64_t id, const char *json) {
 }
 
 static void on_rpc(const char *seq, const char *req, void *arg) {
-  (void)seq;
   (void)arg;
 
+  /* Settle webview's own promise for this call; the real reply goes via _reply. */
+  webview_return(g_window, seq, 0, "null");
+
+  /* req is the JSON argument array, e.g. [{"id":1,"method":...}]. */
   int64_t id = 0;
-  if (!json_int(req, "id", &id)) return;
+  if (!json_int(req, "id", &id)) {
+    fprintf(stderr, "text-edit: rpc request without id: %.200s\n", req);
+    return;
+  }
 
   char method[64];
   if (!json_str(req, "method", method, sizeof method)) {
@@ -808,15 +929,14 @@ static void on_rpc(const char *seq, const char *req, void *arg) {
 int main(void) {
   core_init();
   cache_init();
+  load_bodies();
 
   g_window = webview_create(getenv("TEXT_EDIT_DEBUG") != NULL, NULL);
   if (g_window == NULL) {
     die("could not create the window (webview_create returned null)");
   }
 
-  /* A non-null handle does not prove a window exists: the platform can hand
-   * back a context whose native window failed to appear, which is exactly the
-   * "starts and shows nothing" symptom. Check the handle itself. */
+  /* A non-null webview does not prove a native window appeared. */
   if (webview_get_window(g_window) == NULL) {
     die("the window was created but has no native handle");
   }

@@ -45,6 +45,21 @@ the window loads. Not intermittent, and not specific to one button.
 
 ---
 
+### Actual root cause (dispatch fix was not sufficient)
+
+webview's JS shim sends `JSON.stringify(argumentsArray)` as `req`. The page
+called `window.rpc(JSON.stringify({id,...}))`, so the host received
+`["{\"id\":1,...}"]`: one string token. `json_value` never found `"id"`, and
+`on_rpc` returned silently, every time. That is why the timeout was a constant
+3s on the first call.
+
+Fix: the page passes the object (`window.rpc({ id, method, params })`), so
+`req` is `[{"id":1,...}]`. `on_rpc` now logs requests that have no id instead
+of dropping them, and it calls `webview_return(seq, 0, "null")` so webview's own
+per-call promise settles rather than leaking.
+
+---
+
 ## `[object Object]`
 
 The panic message carried no information.
@@ -161,3 +176,64 @@ WebView2 library:
 - whether the page's `_reply` handler is defined before the first eval lands
 
 If a timeout survives the dispatch fix, those two are what to check next.
+
+---
+
+## `cannot write index.json`
+
+### Cause
+
+`write_atomic` wrote a temp file and called `rename()` over the target. On
+Windows, the C runtime's `rename()` fails when the destination exists, so the
+first save worked and every later one failed.
+
+### Fix
+
+On Windows, use `MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING |
+MOVEFILE_WRITE_THROUGH)`. POSIX keeps `rename()`.
+
+---
+
+## `open: reply has no text`
+
+### Cause
+
+The host's `open` replied with `{length}` only. The page needs `{text}` to show
+the document.
+
+### Fix
+
+`open` now sends back `{length, text}`, with the body JSON-escaped. The reply
+buffer was 64 KiB and could not hold a full document. It is now sized for a
+MAX_TEXT body escaped at worst 6x, and `reply_to_page` escapes into heap memory
+instead of a 64 KiB stack array.
+
+---
+
+## `rpc: unknown method` (Cache folder button, Save)
+
+### Cause
+
+The page calls `reveal` and `save`. The C host never implemented either one.
+
+### Fix
+
+- `reveal` opens the cache root in the file manager: `ShellExecuteA` on
+  Windows (links `shell32`), `open` on macOS, `xdg-open` elsewhere.
+- `save` writes the document body and the index.
+
+---
+
+## Documents vanished on restart; `index.json` removed
+
+### Cause
+
+The host wrote `index.json` but never read it, so nothing reloaded documents
+at startup.
+
+### Fix
+
+The index is gone. The directory is now the list of documents: each one is
+`bodies/<name>.md`, the name is the id, and `load_bodies()` scans the directory
+at startup. Rename is a file rename. Names follow Windows filename rules
+everywhere and are compared without regard to case.

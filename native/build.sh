@@ -64,7 +64,7 @@ case "$target" in
     -Wl,--gc-sections -Wl,--subsystem,windows \
     host.c "$work/program.obj" $(cat "$work/order") "$RT_WIN"/vendor/*/*.a \
     "$work/libwebview.lib" \
-    -ladvapi32 -liphlpapi -lws2_32 -lbcrypt -lcrypt32 -luserenv \
+    -ladvapi32 -liphlpapi -lws2_32 -lbcrypt -lcrypt32 -luserenv -lshell32 \
     -o ../dist/text-edit-windows-x64.exe
   printf 'built ../dist/text-edit-windows-x64.exe\n'
   ;;

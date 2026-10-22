@@ -24,8 +24,7 @@ if (!html.includes(tag)) {
 // calls webview_set_html and there is no server to serve anything.
 // Function replacer, not a string: `$&`, `$\`` and `$'` inside the bundle would
 // otherwise be expanded as replacement patterns and splice the matched tag into
-// the script. Minified CodeMirror contains `$&`, and that is exactly how the
-// page ended up with nested <script> tags and rendered as text.
+// the script. Minified CodeMirror contains `$&`.
 const page = html.replace(tag, () => `<script>${js}</script>`);
 
 const dest = new URL("../native/ui_html.h", import.meta.url).pathname;
@@ -36,8 +35,7 @@ console.log(`ui: ${(Buffer.byteLength(page) / 1024).toFixed(0)} KiB -> native/ui
 function cLiteral(s: string): string {
   // Escape everything outside printable ASCII. Emitting UTF-8 bytes raw makes
   // the literal depend on the compiler's source charset, and the webview then
-  // decodes them as Latin-1: "⌘" arrives as "â\x8c\x98" and the page renders as
-  // text. Octal escapes are at most three digits, so they cannot swallow a
+  // decodes them as Latin-1. Octal escapes are at most three digits, so they cannot swallow a
   // following character the way \x can.
   const bytes = new TextEncoder().encode(s);
   const parts: string[] = [];
