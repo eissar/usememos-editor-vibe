@@ -1,7 +1,7 @@
 import { EditorView } from "@codemirror/view";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { makeEditorState, type EditRange } from "./editor.ts";
-import { panic, parseJson, run } from "./panic.ts";
+import { parseReplyObject, panic, run } from "./panic.ts";
 
 type RpcFn = (payload: string) => string;
 declare global {
@@ -24,7 +24,7 @@ window.rpc._reply = (id, result) => {
   if (entry === undefined) return;
   inflight.delete(id);
 
-  const parsed = parseJson(result);
+  const parsed = parseReplyObject(result);
   if (!parsed.ok) {
     entry.reject(new Error("rpc: malformed reply"));
     return;
